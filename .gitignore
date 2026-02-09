@@ -1,0 +1,7 @@
+# 1. .env faylni git'dan o'chiring (lekin diskdan yo'q qilmang)
+git rm --cached .env
+
+# 2. .gitignore fayliga qo'shing
+echo ".env" >> .gitignore
+echo "*.env" >> .gitignore
+echo "__pycache__/" >> .gitignore
