@@ -1,5 +1,5 @@
 import aiohttp
-import asyncio, math, re, os, requests,asyncpg
+import asyncio, math, re, os, requests
 import sys
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
@@ -13,20 +13,90 @@ from aiogram.types import (
 from geopy.geocoders import Nominatim
 import spacy
 from aiogram.filters import BaseFilter
-
 from dotenv import load_dotenv
+import asyncpg
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
+
 load_dotenv()
+
 import openai, os
 from openai import AsyncOpenAI
 ai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
 
 # ---------------- konfig ----------------
 BOT_TOKEN  = os.getenv("BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 ADMIN_ID   = set(int(i.strip()) for i in os.getenv("ADMIN_ID").split(","))
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:EuYdfdXvtJFcPxWlxcOjQHITnxUYOtlX@trolley.proxy.rlwy.net:46504/railway")
 
+# ---------- Database Pool ----------
+_pool = None
 
+async def init_db_pool():
+    """PostgreSQL ulanish pool ni boshlash"""
+    global _pool
+    _pool = await asyncpg.create_pool(
+        DATABASE_URL,
+        min_size=1,
+        max_size=10,
+        command_timeout=60,
+        max_inactive_connection_lifetime=300
+    )
+    await create_tables()
+    print("✅ PostgreSQL ulandi va jadvallar tayyor")
+
+async def create_tables():
+    """Barcha kerakli jadvallarni yaratish"""
+    async with get_connection() as conn:
+        # places jadvali
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS places (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                lat DOUBLE PRECISION NOT NULL,
+                lng DOUBLE PRECISION NOT NULL,
+                text_user TEXT NOT NULL,
+                text_channel TEXT NOT NULL
+            )
+        """)
+        
+        # blacklist jadvali
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS blacklist (
+                word TEXT PRIMARY KEY
+            )
+        """)
+
+@asynccontextmanager
+async def get_connection() -> AsyncIterator[asyncpg.Connection]:
+    """Database ulanishini boshqarish"""
+    if _pool is None:
+        raise RuntimeError("Database pool initialized emas! Avval init_db_pool() chaqiring")
+    conn = await _pool.acquire()
+    try:
+        yield conn
+    finally:
+        await _pool.release(conn)
+
+# Qulaylik uchun qisqa funksiyalar
+async def fetch(query: str, *args):
+    async with get_connection() as conn:
+        return await conn.fetch(query, *args)
+
+async def fetchrow(query: str, *args):
+    async with get_connection() as conn:
+        return await conn.fetchrow(query, *args)
+
+async def execute(query: str, *args):
+    async with get_connection() as conn:
+        return await conn.execute(query, *args)
+
+async def close_db():
+    """Database pool ni yopish"""
+    if _pool:
+        await _pool.close()
+        print("🔌 PostgreSQL ulanishi yopildi")
 
 # ---------- geocoderlar ----------
 from geopy.geocoders import Nominatim, GoogleV3
@@ -41,29 +111,28 @@ class BlacklistWord(StatesGroup):
     waiting_word = State()
 
 class BlacklistManage(StatesGroup):
-    waiting_number = State()   # o‘chirish uchun raqam
+    waiting_number = State()   # o'chirish uchun raqam
     waiting_confirm = State()  # tasdiq uchun
-
 
 # ---------- tilni kodda aniqlash ----------
 CYRILLIC = set("абвгдеёжзийклмнопрстуфхцчшщъыьэюя")
+
 def detect_lang(text: str) -> str:
     """
     0-dependency til aniqlash:
-      1) agar 30% belgi kirill → 'ru'
-      2) aks holda 'en'
+    1) agar 30% belgi kirill → 'ru'
+    2) aks holda 'en'
     """
     low = text.lower()
     cyr = sum(ch in CYRILLIC for ch in low)
     lat = sum(ch.isalpha() and ch.isascii() for ch in low)
     return "ru" if cyr / max(1, cyr + lat) >= 0.30 else "en"
 
-
 async def geocode_with_retry(query: str, timeout: int = 30):
     """
     1) Nominatim (1 s kutib)
-    2) Agar Google API bor bo‘lsa → Google
-    3) Agar Photon (open) kerak bo‘lsa → https://photon.komoot.io
+    2) Agar Google API bor bo'lsa → Google
+    3) Agar Photon (open) kerak bo'lsa → https://photon.komoot.io
     Har biriga 3 urinish, timeout 30 s
     """
     query = query.strip()
@@ -84,9 +153,9 @@ async def geocode_with_retry(query: str, timeout: int = 30):
             if geo and "united states" in geo.address.lower():
                 return geo.latitude, geo.longitude
         except (GeocoderUnavailable, GeocoderTimedOut):
-            continue                      # ← 1) bu yerdagi "if geo and" olib tashlandi
+            continue
 
-    # 2) Google (agar kalit bor bo‘lsa)
+    # 2) Google (agar kalit bor bo'lsa)
     if geolocator_goo:
         for _ in range(3):
             try:
@@ -102,7 +171,7 @@ async def geocode_with_retry(query: str, timeout: int = 30):
 
     # 3) Photon (ochiq, tezkor, registratsiyasiz)
     try:
-        url = "https://photon.komoot.io/api"   # ← 2) oxiridagi probel olib tashlandi
+        url = "https://photon.komoot.io/api"
         params = {"q": query, "limit": 1}
         async with aiohttp.ClientSession() as ses:
             async with ses.get(url, params=params, timeout=timeout) as resp:
@@ -116,241 +185,72 @@ async def geocode_with_retry(query: str, timeout: int = 30):
 
     return None, None
 
-
-
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:EuYdfdXvtJFcPxWlxcOjQHITnxUYOtlX@trolley.proxy.rlwy.net:46504/railway")
-
-# Global pool
-db_pool = None
-
-async def init_db():
-    """PostgreSQL ulanish poolini yaratish va jadvallarni tekshirish"""
-    global db_pool
-    db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
-    
-    async with db_pool.acquire() as conn:
-        # Places jadvali
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS places (
-                id SERIAL PRIMARY KEY,
-                name TEXT NOT NULL,
-                lat DOUBLE PRECISION NOT NULL,
-                lng DOUBLE PRECISION NOT NULL,
-                text_user TEXT NOT NULL,
-                text_channel TEXT NOT NULL
-            )
-        """)
-        
-        # Blacklist jadvali
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS blacklist (
-                word TEXT PRIMARY KEY
-            )
-        """)
-        
-        # Indexlar
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_places_name ON places(name);
-            CREATE INDEX IF NOT EXISTS idx_places_coords ON places(lat, lng);
-        """)
-
-async def close_db():
-    """Poolni yopish"""
-    global db_pool
-    if db_pool:
-        await db_pool.close()
-
-
 async def add_blacklist_word(word: str):
-    """So'zni qora ro'yxatga qo'shish"""
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO blacklist(word) VALUES($1) ON CONFLICT (word) DO NOTHING",
-            word.lower()
-        )
-
-async def delete_blacklist_word(word: str):
-    """So'zni qora ro'yxatdan o'chirish"""
-    async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM blacklist WHERE word = $1", word)
+    await execute("INSERT INTO blacklist(word) VALUES($1) ON CONFLICT (word) DO NOTHING", word.lower())
 
 async def get_blacklist() -> set[str]:
-    """Qora ro'yxatni olish"""
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT word FROM blacklist")
-        return {row['word'] for row in rows}
-
+    rows = await fetch("SELECT word FROM blacklist")
+    return {r["word"] for r in rows}
 
 async def load_places_from_db():
-    """PostgreSQL dan barcha joylarni yuklash"""
-    global db_pool
-    
-    # Pool hali yaratilmagan bo'lsa, yaratamiz
-    if db_pool is None:
-        await init_db()
-    
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM places ORDER BY id")
-        if not rows:
-            return None
-        
-        return [
-            {
-                "id": row['id'],
-                "name": row['name'],
-                "lat": row['lat'],
-                "lng": row['lng'],
-                "text_user": row['text_user'],
-                "text_channel": row['text_channel'],
-                "text": row['text_user']  # eski kodlar uchun
-            }
-            for row in rows
-        ]
-
-
-
-
+    rows = await fetch("SELECT * FROM places")
+    if not rows:
+        return None
+    return [
+        {
+            "id": r["id"],
+            "name": r["name"],
+            "lat": r["lat"],
+            "lng": r["lng"],
+            "text_user": r["text_user"],
+            "text_channel": r["text_channel"],
+            "text": r["text_user"]
+        }
+        for r in rows
+    ]
 
 def is_gibberish(text: str) -> bool:
     """So'zma-so'z ekanligini tekshiradi"""
     t = text.lower().strip()
     if not t:
         return True
-    
     words = t.split()
     if not words:
         return True
-    
+
     # Agar barcha so'zlar bema'ni kombinatsiyadan iborat bo'lsa
     vowels = set('aeiouy')
     total_chars = 0
     total_vowels = 0
-    
     for word in words:
         clean = re.sub(r'[^a-z]', '', word)
         if len(clean) > 0:
             total_chars += len(clean)
             total_vowels += sum(1 for c in clean if c in vowels)
-    
+
     # Agar umumiy belgilar 10 tadan ko'p bo'lsa va unli harflar 15% dan kam bo'lsa -> bema'ni
     if total_chars > 10 and (total_vowels / total_chars) < 0.15:
         return True
-        
     return False
 
-
-async def add_place_to_db(name: str, lat: float, lng: float, text_user: str, text_channel: str) -> int:
-    """Yangi joy qo'shish, ID qaytaradi"""
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """INSERT INTO places (name, lat, lng, text_user, text_channel) 
-               VALUES ($1, $2, $3, $4, $5) RETURNING id""",
-            name, lat, lng, text_user, text_channel
-        )
-        return row['id']
-
-async def get_place_by_id(place_id: int) -> dict | None:
-    """ID bo'yicha joy olish"""
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT * FROM places WHERE id = $1", place_id
-        )
-        if row:
-            return dict(row)
-        return None
-
-async def swap_places_in_db(id1: int, id2: int):
-    """Ikki joyning matnlarini almashtirish"""
-    async with db_pool.acquire() as conn:
-        # Transaction ichida
-        async with conn.transaction():
-            # Birinchi joy ma'lumotlari
-            place1 = await conn.fetchrow("SELECT name, text_user, text_channel FROM places WHERE id = $1", id1)
-            place2 = await conn.fetchrow("SELECT name, text_user, text_channel FROM places WHERE id = $1", id2)
-            
-            if not place1 or not place2:
-                return False
-            
-            # Almashtirish
-            await conn.execute(
-                "UPDATE places SET name = $1, text_user = $2, text_channel = $3 WHERE id = $4",
-                place2['name'], place2['text_user'], place2['text_channel'], id1
-            )
-            await conn.execute(
-                "UPDATE places SET name = $1, text_user = $2, text_channel = $3 WHERE id = $4",
-                place1['name'], place1['text_user'], place1['text_channel'], id2
-            )
-            return True
-
-
-async def update_place_field_in_db(place_id: int, field: str, new_value):
-    """Maydonni yangilash (xavfsiz)"""
-    # Ruxsat etilgan maydonlar
-    allowed_fields = {'name', 'lat', 'lng', 'text_user', 'text_channel'}
-    if field not in allowed_fields:
-        raise ValueError(f"Noto'g'ri maydon: {field}")
-    
-    async with db_pool.acquire() as conn:
-        # Parametrlangan so'rov (SQL injection dan himoyalangan)
-        query = f"UPDATE places SET {field} = $1 WHERE id = $2"
-        await conn.execute(query, new_value, place_id)
+async def add_place_to_db(name, lat, lng, text_user, text_channel):
+    await execute(
+        "INSERT INTO places (name, lat, lng, text_user, text_channel) VALUES ($1, $2, $3, $4, $5)",
+        name, lat, lng, text_user, text_channel
+    )
 
 async def delete_place_from_db(place_id: int):
-    """Joyni o'chirish"""
-    async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM places WHERE id = $1", place_id)
+    await execute("DELETE FROM places WHERE id = $1", place_id)
 
-# Windows vs Linux ajratmasdan, har doim bot papkasida saqlaymiz
-
-async def ai_extract_city(text: str) -> str:
-    """
-    Matndan AQSh shahar yoki shtat nomini ajratadi.
-    Har qanday shahar uchun ishlaydi (kichik yoki katta).
-    """
-    t = strip_greeting(text).strip()
-    if not t or len(t) < 2:
-        return ""
+async def update_place_field_in_db(place_id: int, field: str, new_value: str):
+    # Field nomini to'g'riligini tekshirish (SQL injection oldini olish)
+    allowed_fields = {"name", "lat", "lng", "text_user", "text_channel"}
+    if field not in allowed_fields:
+        raise ValueError(f"Field '{field}' ruxsat berilmagan")
     
-    try:
-        r = await ai.chat.completions.create(
-            model="gpt-3.5-turbo",  # yoki "gpt-4" agar aniqroq natija kerak bo'lsa
-            messages=[
-                {"role": "system",
-                 "content": (
-                     "You are a US location extractor. The text can be in Uzbek, Russian or English. "
-                     "Extract the US city name or state name. "
-                     "IMPORTANT: It can be ANY US city, not just famous ones (New York, LA). "
-                     "Small cities like 'Columbia Missouri', 'El Paso', 'Knoxville', 'Ann Arbor' etc. are also valid. "
-                     "Examples:\n"
-                     "- 'menga kansas city dan ovqat kerak' -> Kansas City, Missouri, USA\n"
-                     "- 'нужна еда из маленького городка в техасе' -> Texas (or specific city if mentioned)\n"
-                     "- 'man columbia modaman' -> Columbia, Missouri, USA\n"
-                     "- 'ovqat yetkazib berish austin tx' -> Austin, Texas, USA\n"
-                     "- 'send las vegas food' -> Las Vegas, Nevada, USA\n"
-                     "Format: 'City, State, USA' or 'City, USA'. "
-                     "If no US location: reply EMPTY"
-                 )},
-                {"role": "user", "content": t}
-            ],
-            temperature=0,
-            max_tokens=50
-        )
-        result = r.choices[0].message.content.strip()
-        
-        # AI "EMPTY" deb qaytarganini tekshirish
-        if result.upper() in ["EMPTY", "NONE", "NULL"] or not result or len(result) < 2:
-            return ""
-            
-        # Agar javobda "USA" bo'lmasa, qo'shib qo'yish
-        if "usa" not in result.lower():
-            result += ", USA"
-            
-        return result
-    except Exception as e:
-        print(f"AI extraction error: {e}")
-        return ""
+    query = f"UPDATE places SET {field} = $1 WHERE id = $2"
+    await execute(query, new_value, place_id)
 
-# ✅ app.py boshiga (allqachon bor, lekin to‘liq)
 async def load_places():
     rows = await load_places_from_db()
     if rows is None:                       # birinchi marta
@@ -363,10 +263,8 @@ async def load_places():
         rows = await load_places_from_db()
     return rows
 
-# ✅ PLACES ni bot ishga tushishi bilan yuklaymiz
+# ---------------- global o'zgaruvchilar ----------------
 PLACES = []  # boshlang'ich qiymat
-
-
 
 initial_places = [
             {
@@ -1402,35 +1300,11 @@ initial_places = [
             }
         ]
 
-
-
-async def add_place_to_db(name: str, lat: float, lng: float, text_user: str, text_channel: str) -> int:
-    """Yangi joy qo'shish va uning ID sini qaytarish"""
-    global db_pool
-    
-    if db_pool is None:
-        await init_db()
-    
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """INSERT INTO places (name, lat, lng, text_user, text_channel) 
-               VALUES ($1, $2, $3, $4, $5) 
-               RETURNING id""",
-            name, lat, lng, text_user, text_channel
-        )
-        return row['id']
-
-
-# ---------------- global o'zgaruvchilar ---------------- 
 # ---------------- bot va dispatcher ----------------
-bot = Bot(token=BOT_TOKEN,
-          default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
+
 geolocator = Nominatim(user_agent="halal_bot")
-
-import spacy
-
-
 
 # Inglizcha model
 try:
@@ -1440,7 +1314,7 @@ except OSError:
     subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"], check=True)
     nlp_en = spacy.load("en_core_web_sm")
 
-# Ruscha model (spacy-udpipe o‘rniga spacy modeli)
+# Ruscha model
 try:
     nlp_ru = spacy.load("ru_core_news_sm")
 except OSError:
@@ -1449,32 +1323,24 @@ except OSError:
     nlp_ru = spacy.load("ru_core_news_sm")
 
 # ---------------- masofa (None xavfsiz) ----------------
-# Agar siz haversine ichida print qo'shgan bo'lsangiz, uni ham olib tashlang:
 def haversine(lat1, lon1, lat2, lon2):
     """Ikki nuqta orasidagi masofani km da hisoblaydi"""
     try:
         if any(x is None or not isinstance(x, (int, float)) for x in [lat1, lon1, lat2, lon2]):
             return float('inf')
-        
         R = 6371
         φ1, φ2 = math.radians(lat1), math.radians(lat2)
         Δφ = math.radians(lat2 - lat1)
         Δλ = math.radians(lon2 - lon1)
-        
         a = math.sin(Δφ/2)**2 + math.cos(φ1)*math.cos(φ2)*math.sin(Δλ/2)**2
         return 2 * R * math.asin(math.sqrt(a))
     except Exception:
         return float('inf')
 
-
 # ---------------- shaharni matndan ajratib olish ----------------
-
-
-
 import re
 import asyncio
 from geopy.geocoders import Nominatim
-
 geolocator = Nominatim(user_agent="halal_bot")
 
 async def smart_usa_coords(text: str) -> tuple[float, float] | tuple[None, None]:
@@ -1484,17 +1350,17 @@ async def smart_usa_coords(text: str) -> tuple[float, float] | tuple[None, None]
     """
     if not text:
         return None, None
-
+    
     t = text.strip().lower()
-
-    # 1) 2-harfli shtat kodini to‘liq nomga almashtiramiz
+    
+    # 1) 2-harfli shtat kodini to'liq nomga almashtiramiz
     state_code = None
     for code, full in STATE_CODES.items():
         if f" {code}" in f" {t} " or t.endswith(f" {code}"):
             state_code = full.title()
             break
-
-    # 2) so‘zlarni ajratamiz
+    
+    # 2) so'zlarni ajratamiz
     words = re.findall(r'\b\w+\b', t)
     city_words = []
     for w in words:
@@ -1503,18 +1369,19 @@ async def smart_usa_coords(text: str) -> tuple[float, float] | tuple[None, None]
         if len(w) <= 2:                    # 2 harfli ortiqcha
             continue
         city_words.append(w)
-
+    
     city = " ".join(city_words).title()
-    if not city:                           # faqat shtat kiritilgan bo‘lsa
+    
+    if not city:                           # faqat shtat kiritilgan bo'lsa
         return None, None
-
+    
     # 3) shtatni aniqlaymiz (kiritilgan yoki default)
     if state_code:
         query = f"{city}, {state_code}, USA"
     else:
         # shtat kiritilmagan – geopyga shahar + USA deb topsin
         query = f"{city}, USA"
-
+    
     # 4) geopy orqali topamiz
     try:
         geo = await asyncio.to_thread(
@@ -1528,8 +1395,8 @@ async def smart_usa_coords(text: str) -> tuple[float, float] | tuple[None, None]
             return geo.latitude, geo.longitude
     except Exception:
         pass
+    
     return None, None
-
 
 import re
 import requests
@@ -1555,31 +1422,23 @@ def parse_gmaps_link(url: str) -> tuple[float | None, float | None]:
         
         # 🔑 MUHIM: Har qanday havolani URL decode qilish (%20, %2C kabilarni tozalash)
         url = unquote(url)
-
-        # 2. Barcha mumkin bo'lgan patternlar (kengaytirilgan)
+        
+        # 2. Barcha mumkin bo'lgan patternlar
         patterns = [
             # @lat,lng (probel bilan yoki bezganda)
             r'@(-?\d{1,3}\.?\d*)\s*,\s*(-?\d{1,3}\.?\d*)',
-            
             # !3dlat!4dlng (Google Maps data formati)
             r'!3d(-?\d+\.?\d*)!4d(-?\d+\.?\d*)',
-            
             # data=...!3d...!4d...
             r'data=[^&]*!3d(-?\d+\.?\d*)!4d(-?\d+\.?\d*)',
-            
             # ll=lat,lng (probel bilan yoki bezganda)
             r'[?&]ll=(-?\d{1,3}\.?\d*)\s*,\s*(-?\d{1,3}\.?\d*)',
-            
             # 🔑 q=lat,lng (query parameter) - probel va +/- bilan
-            # SIZNING HAVOLANGIZ UCHUN: q=37.80681200 ,-122.41256100
             r'[?&]q=(-?\d{1,3}\.?\d*)\s*,\s*([+-]?\d{1,3}\.?\d*)',
-            
             # /search/lat,lng
             r'/search/(-?\d{1,3}\.?\d*)\s*,\s*[+]?\s*(-?\d{1,3}\.?\d*)',
-            
             # @lat,lng,15z (zoom level bilan)
             r'@(-?\d{1,3}\.?\d*)\s*,\s*(-?\d{1,3}\.?\d*),\d+\.?\d*z',
-            
             # cbll=lat,lng
             r'[?&]cbll=(-?\d{1,3}\.?\d*)\s*,\s*(-?\d{1,3}\.?\d*)',
         ]
@@ -1592,7 +1451,6 @@ def parse_gmaps_link(url: str) -> tuple[float | None, float | None]:
                 # Validatsiya: latitude -90 dan 90 gacha, longitude -180 dan 180 gacha
                 if -90 <= lat <= 90 and -180 <= lng <= 180:
                     return lat, lng
-
     except Exception as e:
         print(f"Parse xatosi: {e}")
         pass
@@ -1602,12 +1460,11 @@ def parse_gmaps_link(url: str) -> tuple[float | None, float | None]:
 def extract_city_spacy(text: str) -> str:
     """
     spaCy orqali shahar nomini ajratib oladi.
-    Tilni detect_lang() bilan aniqlaymiz (langdetect ishlatilmaydi).
+    Tilni detect_lang() bilan aniqlaymiz.
     """
-    lang = detect_lang(text)          # ← o‘zimizning funksiyamiz
+    lang = detect_lang(text)
     nlp = nlp_ru if lang == "ru" else nlp_en
     doc = nlp(text)
-
     for ent in doc.ents:
         if ent.label_ in {"GPE", "LOC"}:
             return ent.text
@@ -1627,39 +1484,31 @@ class AddRest(StatesGroup):
     menu_num = State()
     phone = State()
     telegram = State()
-    extra_info = State()          # ← ixtiyoriy
+    extra_info = State()
     confirm = State()
-
 
 class EditDeleteRest(StatesGroup):
     waiting_for_number = State()   # foydalanuvchi raqam kiritmoqda
     edit_index = State()           # tahrirlanayotgan restoran indeksi
     action = State()               # qaysi maydon tahrirlanmoqda
-    waiting_location_link = State()  # ← NEW: havola kutilmoqda
+    waiting_location_link = State()  # havola kutilmoqda
 
 class EditNumFilter(BaseFilter):
     pattern = re.compile(r"^edit_(\d+)$")
-
     async def __call__(self, call: types.CallbackQuery) -> bool | dict:
         match = self.pattern.match(call.data)
         return {"edit_index": int(match.group(1))} if match else False
 
 class EditLocLinksFilter(BaseFilter):
     pattern = re.compile(r"^edit_location_links_(\d+)$")
-
     async def __call__(self, call: types.CallbackQuery) -> bool | dict:
         match = self.pattern.match(call.data)
         return {"edit_index": int(match.group(1))} if match else False
 
-class SwapLocation(StatesGroup):
-    waiting_first  = State()   # birinchi restoran raqami
-    waiting_second = State()   # ikkinchi restoran raqami
-
 class AdminQuickSwap(StatesGroup):
     waiting_city   = State()   # shaharni kiritish
     waiting_pick   = State()   # tanlangan restoran
-    waiting_target = State()   # qaysi raqamga ko‘chirish
-
+    waiting_target = State()   # qaysi raqamga ko'chirish
 
 # ---------------- inline tugmalar ----------------
 def confirm_ikb() -> InlineKeyboardMarkup:
@@ -1673,10 +1522,10 @@ def confirm_ikb() -> InlineKeyboardMarkup:
 def admin_main_menu_ikb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Yangi restoran qo‘shish", callback_data="start_add_rest")],
+            [InlineKeyboardButton(text="➕ Yangi restoran qo'shish", callback_data="start_add_rest")],
             [InlineKeyboardButton(text="📋 Barcha restoranlar", callback_data="show_all_restaurants")],
-            [InlineKeyboardButton(text="➕ So‘z qora ro‘yxati", callback_data="blacklist_word")],
-            [InlineKeyboardButton(text="📋 Qora ro‘yxat", callback_data="list_blacklist")]
+            [InlineKeyboardButton(text="➕ So'z qora ro'yxati", callback_data="blacklist_word")],
+            [InlineKeyboardButton(text="📋 Qora ro'yxat", callback_data="list_blacklist")]
         ]
     )
 
@@ -1685,48 +1534,44 @@ async def list_blacklist(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
     words = await get_blacklist()
     if not words:
-        await call.message.answer("❌ Qora ro‘yxat bo‘sh.")
+        await call.message.answer("❌ Qora ro'yxat bo'sh.")
         return
-
-    text = "📋 <b>Qora ro‘yxatdagi so‘zlar:</b>\n\n"
+    
+    text = "📋 <b>Qora ro'yxatdagi so'zlar:</b>\n"
     for i, w in enumerate(words, 1):
         text += f"{i}. <code>{w}</code>\n"
-
-    await call.message.answer(text + "\nO‘chirish uchun raqam yuboring:")
+    
+    await call.message.answer(text + "\nO'chirish uchun raqam yuboring:")
     await state.set_state(BlacklistManage.waiting_number)
 
-@dp.message(BlacklistManage.waiting_number, F.text.isdigit)
+@dp.message(BlacklistManage.waiting_number, F.text.isdigit())
 async def choose_blacklist_word(message: types.Message, state: FSMContext):
     num = int(message.text)
     words = sorted(await get_blacklist())
     if not (1 <= num <= len(words)):
-        await message.answer("❌ Noto‘g‘ri raqam.")
+        await message.answer("❌ Noto'g'ri raqam.")
         return
-
+    
     word = words[num - 1]
     await state.update_data(word=word, number=num)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🗑️ O‘chirish", callback_data="confirm_del_blacklist")],
+        [InlineKeyboardButton(text="🗑️ O'chirish", callback_data="confirm_del_blacklist")],
         [InlineKeyboardButton(text="❌ Bekor", callback_data="cancel_del_blacklist")]
     ])
-    await message.answer(f"«<code>{word}</code>» ni o‘chirishni xohlaysizmi?", reply_markup=kb)
+    await message.answer(f"«<code>{word}</code>» ni o'chirishni xohlaysizmi?", reply_markup=kb)
     await state.set_state(BlacklistManage.waiting_confirm)
-
-
-
 
 @dp.callback_query(F.data == "confirm_del_blacklist", BlacklistManage.waiting_confirm)
 async def delete_blacklist_word(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     word = data["word"]
-    await delete_blacklist_word(word)
-    await call.message.edit_text(f"✅ «<code>{word}</code>» qora ro‘yxatdan o‘chirildi.")
+    await execute("DELETE FROM blacklist WHERE word = $1", word)
+    await call.message.edit_text(f"✅ «<code>{word}</code>» qora ro'yxatdan o'chirildi.")
     await state.clear()
-
 
 @dp.callback_query(F.data == "cancel_del_blacklist", BlacklistManage.waiting_confirm)
 async def cancel_del_blacklist(call: types.CallbackQuery, state: FSMContext):
-    await call.message.edit_text("❌ O‘chirish bekor qilindi.")
+    await call.message.edit_text("❌ O'chirish bekor qilindi.")
     await state.clear()
 
 # ---------------- admin panel ----------------
@@ -1735,6 +1580,7 @@ async def start(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_ID:
         await message.answer("👋 Botdan foydalanish uchun joy yoki shahar nomini yuboring.")
         return
+    
     await message.answer("🔐 Admin panelga xush kelibsiz!", reply_markup=admin_main_menu_ikb())
 
 @dp.callback_query(F.data == "start_add_rest")
@@ -1791,26 +1637,24 @@ async def got_menu(message: types.Message, state: FSMContext):
 async def got_phone(message: types.Message, state: FSMContext):
     await state.update_data(phone=message.text.strip())
     await state.set_state(AddRest.telegram)
-    await message.answer("📱 Telegram username’ni yuboring (@sizning_user shaklida):")
-
+    await message.answer("📱 Telegram username'ni yuboring (@sizning_user shaklida):")
 
 @dp.message(AddRest.telegram)
 async def got_tg(message: types.Message, state: FSMContext):
     username = message.text.strip()
     # 1️⃣ format tekshiruvi
     if not username.startswith('@') or len(username) < 2:
-        await message.answer("❌ Iltimos, to‘g‘ri formatda kiriting (@sizning_user shaklida):")
+        await message.answer("❌ Iltimos, to'g'ri formatda kiriting (@sizning_user shaklida):")
         return
-
+    
     # 2️⃣ saqlaymiz
     await state.update_data(telegram=username)
-
-    # 3️⃣ qo'shimcha bosqichiga o‘tamiz
+    # 3️⃣ qo'shimcha bosqichiga o'tamiz
     await state.set_state(AddRest.extra_info)
     await message.answer(
-        "📝 Qo'shimcha ma’lumot kiriting (masalan: «Пн–Вс: 10:00–22:00» yoki bo'sh qoldirish uchun pastdagi tugmani bosing):",
+        "📝 Qo'shimcha ma'lumot kiriting (masalan: «Пн–Вс: 10:00–22:00» yoki bo'sh qoldirish uchun pastdagi tugmani bosing):",
         reply_markup=skip_extra_ikb()
-    )    
+    )
 
 def skip_extra_ikb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -1819,30 +1663,21 @@ def skip_extra_ikb() -> InlineKeyboardMarkup:
         ]
     )
 
-
 @dp.callback_query(AddRest.extra_info, F.data == "skip_extra")
 async def skip_extra_handler(call: types.CallbackQuery, state: FSMContext):
-    await state.update_data(extra_info="")          # bo‘sh qoldirdik
-    await show_confirmation(call, state)            # to‘liq ko‘rsatishga o‘tamiz   
-
-# @dp.callback_query(F.data == "skip_extra", AddRest.extra_info)
-# async def skip_extra(call: types.CallbackQuery, state: FSMContext):
-#     await state.update_data(extra_info="")
-#     await call.message.delete()
-#     await show_confirmation(call, state)
+    await state.update_data(extra_info="")          # bo'sh qoldirdik
+    await show_confirmation(call, state)            # to'liq ko'rsatishga o'tamiz
 
 @dp.message(AddRest.extra_info, F.text)
 async def save_extra_info(message: types.Message, state: FSMContext):
     await state.update_data(extra_info=message.text.strip())
     await show_confirmation(message, state)
 
-
-async def show_confirmation(src: types.Message | types.CallbackQuery,
-                            state: FSMContext):
+async def show_confirmation(src: types.Message | types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     extra = data.get('extra_info', '').strip()
-
-    # 1️⃣ Kanalga yuboriladigan TO‘LIQ matn (raqam bilan)
+    
+    # 1️⃣ Kanalga yuboriladigan TO'LIQ matn (raqam bilan)
     channel_text = (
         f"#️⃣{data['number']}\n"
         f"🍽️ <b>{data['name']}</b>\n"
@@ -1852,28 +1687,28 @@ async def show_confirmation(src: types.Message | types.CallbackQuery,
         f"📞 {data['phone']}\n"
         f"📱 Telegram: {data['telegram']}\n"
     )
+    
     if extra:
-        channel_text += f"📝 Qoʻshimcha: {extra}\n"
-
-    # 2️⃣ Foydalanuvchiga ko‘rsatiladigan TO‘LIQ matn (raqamsiz)
+        channel_text += f"📝 Qo'shimcha: {extra}\n"
+    
+    # 2️⃣ Foydalanuvchiga ko'rsatiladigan TO'LIQ matn (raqamsiz)
     user_text = re.sub(r'^#️⃣\d+\n', '', channel_text, flags=re.M)
-
     await state.update_data(channel_text=channel_text, user_text=user_text)
-
-    # 3️⃣ To‘g‘ri yuborish metodini tanlaymiz
+    
+    # 3️⃣ To'g'ri yuborish metodini tanlaymiz
     send = (
         src.message.answer if isinstance(src, types.CallbackQuery) else src.answer
     )
-
-    # 4️⃣ Agar matn 4096 belgidan oshsa – 2 qismga bo‘lib yuboramiz
+    
+    # 4️⃣ Agar matn 4096 belgidan oshsa – 2 qismga bo'lib yuboramiz
     if len(user_text) > 4096:
         part1 = user_text[:4096]
         part2 = user_text[4096:]
         await send(part1)
-        await send(part2 + "\n\n✅ Tasdiqlash uchun pastdagi tugmalardan foydalaning:", reply_markup=confirm_ikb())
+        await send(part2 + "\n✅ Tasdiqlash uchun pastdagi tugmalardan foydalaning:", reply_markup=confirm_ikb())
     else:
         await send(
-            f"📤 Quyidagi ko‘rinishda yuboriladi:\n\n{user_text}",
+            f"📤 Quyidagi ko'rinishda yuboriladi:\n{user_text}",
             reply_markup=confirm_ikb()
         )
 
@@ -1883,29 +1718,29 @@ async def cancel_edit(call: types.CallbackQuery, state: FSMContext):
     await call.message.edit_text("❌ Tahrirlash bekor qilindi.")
     await call.answer()
 
-
-
 # ---------------- tasdiqlash/bekor qilish ----------------
 @dp.callback_query(F.data == "cancel_add")
 async def cancel_add(call: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.edit_text("❌ Qo‘shish bekor qilindi.")
+    await call.message.edit_text("❌ Qo'shish bekor qilindi.")
     await call.answer("Bekor qilindi", show_alert=False)
 
 @dp.callback_query(F.data == "confirm_add")
 async def confirm_add(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     lat, lng = parse_gmaps_link(data['map_link'])
+    
     if lat is None:
         lat, lng = await coords_from_any(data['city'])
+    
     if lat is None:
         await call.answer("❌ Havola yaroqsiz! Qayta yuboring.", show_alert=True)
         await state.set_state(AddRest.map_link)
         await call.message.answer("🔗 Yangi Google-Maps havolasini yuboring:")
         return
-
+    
     extra = data.get('extra_info', '').strip()
-
+    
     channel_text = (
         f"#️⃣{data['number']}\n"
         f"🍽️ <b>{data['name']}</b>\n"
@@ -1915,11 +1750,12 @@ async def confirm_add(call: types.CallbackQuery, state: FSMContext):
         f"📞 {data['phone']}\n"
         f"📱 Telegram: {data['telegram']}\n"
     )
+    
     if extra:
-        channel_text += f"📝 Qoʻshimcha: {extra}\n"
-
+        channel_text += f"📝 Qo'shimcha: {extra}\n"
+    
     user_text = re.sub(r'^#️⃣\d+\n', '', channel_text, flags=re.M)
-
+    
     new_place = {
         "name": data['name'],
         "lat": lat,
@@ -1928,8 +1764,8 @@ async def confirm_add(call: types.CallbackQuery, state: FSMContext):
         "text_channel": channel_text,
         "text": user_text
     }
-
-    # JSON emas, SQLite ga yozamiz
+    
+    # PostgreSQL ga yozamiz
     await add_place_to_db(
         new_place["name"],
         new_place["lat"],
@@ -1937,13 +1773,13 @@ async def confirm_add(call: types.CallbackQuery, state: FSMContext):
         new_place["text_user"],
         new_place["text_channel"]
     )
-
-    # xotiraga ham qo‘shamiz (foydalanish oson)
+    
+    # xotiraga ham qo'shamiz (foydalanish oson)
     PLACES.append(new_place)
-
+    
     await bot.send_message(CHANNEL_ID, channel_text, parse_mode=ParseMode.HTML)
     await call.message.edit_reply_markup(reply_markup=None)
-    await call.answer("✅ Yangi restoran muvaffaqiyatli qo‘shildi va kanalga yuborildi!", show_alert=True)
+    await call.answer("✅ Yangi restoran muvaffaqiyatli qo'shildi va kanalga yuborildi!", show_alert=True)
     await state.clear()
 
 # ---------------- barcha restoranlar ----------------
@@ -1953,23 +1789,18 @@ async def show_all_restaurants(call: types.CallbackQuery, state: FSMContext):
     if not PLACES:
         await call.message.answer("❌ Hech qanday restoran topilmadi.")
         return
-
-    text = "📋 <b>Barcha restoranlar ro'yxati:</b>\n\n"
+    
+    text = "📋 <b>Barcha restoranlar ro'yxati:</b>\n"
     for i, place in enumerate(PLACES, start=1):
         text += f"{i}. <b>{place['name']}</b>\n"
-
-    
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Restoranlarni almashtirish", callback_data="start_swap")],
         [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="back_to_admin_main")]
     ])
-
-    await call.message.answer(text + "\n\n📌 Raqam kiriting:", reply_markup=kb)
+    
+    await call.message.answer(text + "\n📌 Raqam kiriting:", reply_markup=kb)
     await state.set_state(EditDeleteRest.waiting_for_number)
-
-
-
 
 @dp.callback_query(F.data == "back_to_admin_main")
 async def back_to_admin_main(call: types.CallbackQuery):
@@ -1979,7 +1810,6 @@ async def back_to_admin_main(call: types.CallbackQuery):
         reply_markup=admin_main_menu_ikb()
     )
 
-
 # ---------------- tahrirlash/ochirish uchun raqam kiritish ----------------
 @dp.message(EditDeleteRest.waiting_for_number, F.text.isdigit())
 async def handle_number_input(message: types.Message, state: FSMContext):
@@ -1988,9 +1818,9 @@ async def handle_number_input(message: types.Message, state: FSMContext):
         place = PLACES[num - 1]
         await state.update_data(edit_index=num - 1)
         display_text = get_display_text(place)
-        await message.answer(f"Siz tanladingiz:\n\n{display_text}", reply_markup=get_edit_delete_kb(num - 1))  # ← 0-bazadagi indeks
+        await message.answer(f"Siz tanladingiz:\n{display_text}", reply_markup=get_edit_delete_kb(num - 1))
     else:
-        await message.answer("❌ Noto‘g‘ri raqam. Iltimos, ro‘yxatdagi raqamdan birini kiriting.")
+        await message.answer("❌ Noto'g'ri raqam. Iltimos, ro'yxatdagi raqamdan birini kiriting.")
 
 @dp.message(EditDeleteRest.waiting_for_number)
 async def handle_invalid_input(message: types.Message):
@@ -1998,7 +1828,8 @@ async def handle_invalid_input(message: types.Message):
 
 def get_edit_delete_kb(index: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✏️ Tahrirlash", callback_data=f"edit_{index}"),InlineKeyboardButton(text="🗑️ O'chirish", callback_data=f"delete_{index}")]
+        [InlineKeyboardButton(text="✏️ Tahrirlash", callback_data=f"edit_{index}"),
+         InlineKeyboardButton(text="🗑️ O'chirish", callback_data=f"delete_{index}")]
     ])
 
 # ---------------- tahrirlash ----------------
@@ -2008,7 +1839,6 @@ async def prompt_edit_rest(call: types.CallbackQuery, state: FSMContext, edit_in
         place = PLACES[edit_index]
         await state.update_data(edit_index=edit_index)
         display_text = get_display_text(place)
-
         kb = [
             [InlineKeyboardButton(text="🍽 Restoran nomi", callback_data="edit_name")],
             [InlineKeyboardButton(text="📍 Joylashuv nomi", callback_data="edit_location_names")],
@@ -2018,20 +1848,20 @@ async def prompt_edit_rest(call: types.CallbackQuery, state: FSMContext, edit_in
             [InlineKeyboardButton(text="📞 Telefon raqami", callback_data="edit_phone")],
             [InlineKeyboardButton(text="📱 Telegram username", callback_data="edit_telegram")],
         ]
-
+        
         # 📝 Qo'shimcha bormi?
         txt = place.get("text", "") or place.get("text_user", "") or place.get("text_channel", "")
         if re.search(r'^📝 Q.*?shimcha:', txt, flags=re.M):
-            kb.append([InlineKeyboardButton(text="📝 Qoʻshimcha", callback_data="edit_extra")])
-
+            kb.append([InlineKeyboardButton(text="📝 Qo'shimcha", callback_data="edit_extra")])
+        
         kb.append([InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_edit")])
-
+        
         await call.message.answer(
-            f"Tanlangan restoran:\n\n{display_text}\n\nQuyidagi ma'lumotlarni tahrirlash uchun tugmalardan foydalaning:",
+            f"Tanlangan restoran:\n{display_text}\nQuyidagi ma'lumotlarni tahrirlash uchun tugmalardan foydalaning:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
         )
     else:
-        await call.message.answer("❌ Noto‘g‘ri raqam.")
+        await call.message.answer("❌ Noto'g'ri raqam.")
 
 @dp.callback_query(F.data == "edit_name")
 async def prompt_edit_name(call: types.CallbackQuery, state: FSMContext):
@@ -2039,38 +1869,23 @@ async def prompt_edit_name(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(EditDeleteRest.action)
     await state.update_data(edit_action="name")
 
-
 async def reload_single_place_in_memory(place_id: int):
-    """Bitta joyni PostgreSQL dan qayta yuklash va PLACES da yangilash"""
-    global PLACES, db_pool
-    
-    if db_pool is None:
-        await init_db()
-    
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT * FROM places WHERE id = $1", 
-            place_id
-        )
-        
-        if row:
-            updated = {
-                "id": row['id'],
-                "name": row['name'],
-                "lat": row['lat'],
-                "lng": row['lng'],
-                "text_user": row['text_user'],
-                "text_channel": row['text_channel'],
-                "text": row['text_user']  # eski kodlar uchun
-            }
-            
-            for i, p in enumerate(PLACES):
-                if p["id"] == place_id:
-                    PLACES[i] = updated
-                    break
-
-
-
+    global PLACES
+    row = await fetchrow("SELECT * FROM places WHERE id = $1", place_id)
+    if row:
+        updated = {
+            "id": row["id"],
+            "name": row["name"],
+            "lat": row["lat"],
+            "lng": row["lng"],
+            "text_user": row["text_user"],
+            "text_channel": row["text_channel"],
+            "text": row["text_user"]
+        }
+        for i, p in enumerate(PLACES):
+            if p["id"] == place_id:
+                PLACES[i] = updated
+                break
 
 def replace_name_everywhere(old: str, new: str, text: str) -> str:
     """
@@ -2083,33 +1898,32 @@ def replace_name_everywhere(old: str, new: str, text: str) -> str:
     text = re.sub(rf"^🍽️\s*{re.escape(old)}", f"🍽️ {new}", text, flags=re.I | re.M)
     return text
 
-
 @dp.message(EditDeleteRest.action, F.text)
 async def save_edit_name(message: types.Message, state: FSMContext):
     data = await state.get_data()
     index = data["edit_index"]
     action = data["edit_action"]
     new_value = message.text.strip()
-
+    
     if action == "name":
         old_name = PLACES[index]["name"]
         new_name = new_value
-
-        # 1) PLACES va SQLite dagi nomni yangilaymiz
+        
+        # 1) PLACES va PostgreSQL dagi nomni yangilaymiz
         PLACES[index]["name"] = new_name
         await update_place_field_in_db(PLACES[index]["id"], "name", new_name)
-
+        
         # 2) Matn ichidagi barcha holatlardagi nomni almashtiramiz
         for key in ("text_user", "text_channel"):
             if key in PLACES[index]:
                 PLACES[index][key] = replace_name_everywhere(old_name, new_name, PLACES[index][key])
                 await update_place_field_in_db(PLACES[index]["id"], key, PLACES[index][key])
-
+        
         await message.answer(f"✅ Restoran nomi va matn ichidagi nom yangilandi: {new_name}")
-
-        # 3) PLACES massividagi elementni to‘liq yangilab chiqamiz
+        
+        # 3) PLACES massividagi elementni to'liq yangilab chiqamiz
         await reload_single_place_in_memory(PLACES[index]["id"])
-
+    
     elif action == "location_name_single" or action == "location_name_multi":
         for key in ('text_user', 'text_channel', 'text'):
             if key not in PLACES[index]:
@@ -2122,16 +1936,18 @@ async def save_edit_name(message: types.Message, state: FSMContext):
                 flags=re.IGNORECASE
             )
             PLACES[index][key] = new_text
-        await update_place_field_in_db(PLACES[index]["id"], "text_user", PLACES[index]["text_user"])
-        await update_place_field_in_db(PLACES[index]["id"], "text_channel", PLACES[index]["text_channel"])
+            await update_place_field_in_db(PLACES[index]["id"], "text_user", PLACES[index]["text_user"])
+            await update_place_field_in_db(PLACES[index]["id"], "text_channel", PLACES[index]["text_channel"])
+        
         await message.answer(f"✅ Joylashuv nomi yangilandi: {new_value}")
         await reload_single_place_in_memory(PLACES[index]["id"])
-
+    
     elif action == "location_name_one":
         loc_idx = data['loc_idx']
         txt = PLACES[index]["text"]
         lines = txt.splitlines()
         loc_lines = [i for i, ln in enumerate(lines) if ln.strip().startswith("📍")]
+        
         if loc_idx < len(loc_lines):
             old_line = lines[loc_lines[loc_idx]]
             new_line = re.sub(
@@ -2141,25 +1957,28 @@ async def save_edit_name(message: types.Message, state: FSMContext):
                 flags=re.I
             )
             lines[loc_lines[loc_idx]] = new_line
+            
             for key in ('text', 'text_user', 'text_channel'):
                 if key not in PLACES[index]:
                     continue
                 PLACES[index][key] = "\n".join(lines)
-        await update_place_field_in_db(PLACES[index]["id"], "text_user", PLACES[index]["text_user"])
-        await update_place_field_in_db(PLACES[index]["id"], "text_channel", PLACES[index]["text_channel"])
-        await message.answer(f"✅ {loc_idx + 1}-joylashuv nomi yangilandi: {new_value}")
-        await reload_single_place_in_memory(PLACES[index]["id"])
-
+                await update_place_field_in_db(PLACES[index]["id"], "text_user", PLACES[index]["text_user"])
+                await update_place_field_in_db(PLACES[index]["id"], "text_channel", PLACES[index]["text_channel"])
+            
+            await message.answer(f"✅ {loc_idx + 1}-joylashuv nomi yangilandi: {new_value}")
+            await reload_single_place_in_memory(PLACES[index]["id"])
+    
     elif action == "details":
         for key in ('text', 'text_user', 'text_channel'):
             if key not in PLACES[index]:
                 continue
             PLACES[index][key] = replace_after_location_link(PLACES[index][key], new_value)
-        await update_place_field_in_db(PLACES[index]["id"], "text_user", PLACES[index]["text_user"])
-        await update_place_field_in_db(PLACES[index]["id"], "text_channel", PLACES[index]["text_channel"])
+            await update_place_field_in_db(PLACES[index]["id"], "text_user", PLACES[index]["text_user"])
+            await update_place_field_in_db(PLACES[index]["id"], "text_channel", PLACES[index]["text_channel"])
+        
         await message.answer("✅ Tafsilotlar yangilandi.")
         await reload_single_place_in_memory(PLACES[index]["id"])
-
+    
     elif action == "phone":
         for key in ('text', 'text_user', 'text_channel'):
             if key not in PLACES[index]:
@@ -2170,11 +1989,12 @@ async def save_edit_name(message: types.Message, state: FSMContext):
                 PLACES[index][key],
                 flags=re.IGNORECASE
             )
-        await update_place_field_in_db(PLACES[index]["id"], "text_user", PLACES[index]["text_user"])
-        await update_place_field_in_db(PLACES[index]["id"], "text_channel", PLACES[index]["text_channel"])
+            await update_place_field_in_db(PLACES[index]["id"], "text_user", PLACES[index]["text_user"])
+            await update_place_field_in_db(PLACES[index]["id"], "text_channel", PLACES[index]["text_channel"])
+        
         await message.answer(f"✅ Telefon raqami yangilandi: {new_value}")
         await reload_single_place_in_memory(PLACES[index]["id"])
-
+    
     elif action == "telegram":
         for key in ('text', 'text_user', 'text_channel'):
             if key not in PLACES[index]:
@@ -2185,11 +2005,12 @@ async def save_edit_name(message: types.Message, state: FSMContext):
                 PLACES[index][key],
                 flags=re.IGNORECASE
             )
-        await update_place_field_in_db(PLACES[index]["id"], "text_user", PLACES[index]["text_user"])
-        await update_place_field_in_db(PLACES[index]["id"], "text_channel", PLACES[index]["text_channel"])
+            await update_place_field_in_db(PLACES[index]["id"], "text_user", PLACES[index]["text_user"])
+            await update_place_field_in_db(PLACES[index]["id"], "text_channel", PLACES[index]["text_channel"])
+        
         await message.answer(f"✅ Telegram username yangilandi: {new_value}")
         await reload_single_place_in_memory(PLACES[index]["id"])
-
+    
     elif action == "menu_num":
         for key in ('text', 'text_user', 'text_channel'):
             if key not in PLACES[index]:
@@ -2200,11 +2021,12 @@ async def save_edit_name(message: types.Message, state: FSMContext):
                 PLACES[index][key],
                 flags=re.IGNORECASE
             )
-        await update_place_field_in_db(PLACES[index]["id"], "text_user", PLACES[index]["text_user"])
-        await update_place_field_in_db(PLACES[index]["id"], "text_channel", PLACES[index]["text_channel"])
+            await update_place_field_in_db(PLACES[index]["id"], "text_user", PLACES[index]["text_user"])
+            await update_place_field_in_db(PLACES[index]["id"], "text_channel", PLACES[index]["text_channel"])
+        
         await message.answer(f"✅ Menyu raqami yangilandi: {new_value}")
         await reload_single_place_in_memory(PLACES[index]["id"])
-
+    
     elif action == "extra":
         for key in ('text', 'text_user', 'text_channel'):
             if key not in PLACES[index]:
@@ -2212,35 +2034,35 @@ async def save_edit_name(message: types.Message, state: FSMContext):
             if re.search(r'^📝 Q.*?shimcha:', PLACES[index][key], flags=re.M):
                 PLACES[index][key] = re.sub(
                     r'^📝 Q.*?shimcha:.*$',
-                    f'📝 Qoʻshimcha: {new_value}',
+                    f'📝 Qo\'shimcha: {new_value}',
                     PLACES[index][key],
                     flags=re.M
                 )
             else:
-                PLACES[index][key] += f'\n📝 Qoʻshimcha: {new_value}'
-        await update_place_field_in_db(PLACES[index]["id"], "text_user", PLACES[index]["text_user"])
-        await update_place_field_in_db(PLACES[index]["id"], "text_channel", PLACES[index]["text_channel"])
-        await message.answer("✅ Qoʻshimcha yangilandi.")
+                PLACES[index][key] += f'\n📝 Qo\'shimcha: {new_value}'
+            
+            await update_place_field_in_db(PLACES[index]["id"], "text_user", PLACES[index]["text_user"])
+            await update_place_field_in_db(PLACES[index]["id"], "text_channel", PLACES[index]["text_channel"])
+        
+        await message.answer("✅ Qo'shimcha yangilandi.")
         await reload_single_place_in_memory(PLACES[index]["id"])
-
+    
     else:
         await message.answer(f"✅ {action.capitalize()} yangilandi.")
-
+    
     await state.clear()
-
-
 
 @dp.callback_query(F.data == "blacklist_word")
 async def start_blacklist(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
-    await call.message.answer("❌ Qora ro‘yxatga qo‘shmoqchi bo‘lgan so‘zni yuboring:")
+    await call.message.answer("❌ Qora ro'yxatga qo'shmoqchi bo'lgan so'zni yuboring:")
     await state.set_state(BlacklistWord.waiting_word)
 
 @dp.message(BlacklistWord.waiting_word, F.text)
 async def save_blacklist_word(message: types.Message, state: FSMContext):
     word = message.text.strip().lower()
     await add_blacklist_word(word)
-    await message.answer(f"✅ «{word}» qora ro‘yxatga qo‘shildi.")
+    await message.answer(f"✅ «{word}» qora ro'yxatga qo'shildi.")
     await state.clear()
 
 # ---------------- 📍 3 ta joylashuv nomini alohida tahrirlash ----------------
@@ -2249,11 +2071,9 @@ async def pick_location_name_to_edit(call: types.CallbackQuery, state: FSMContex
     parts = call.data.split("_")
     loc_idx = int(parts[3]) - 1  # 0-bazada
     rest_idx = int(parts[4])
-
     await state.update_data(edit_index=rest_idx, loc_idx=loc_idx, edit_action="location_name_one")
     await call.message.answer(f"{loc_idx + 1}-joylashuv uchun yangi nom kiriting:")
     await state.set_state(EditDeleteRest.action)
-
 
 @dp.callback_query(F.data == "edit_location_names")
 async def prompt_edit_location_names(call: types.CallbackQuery, state: FSMContext):
@@ -2261,29 +2081,29 @@ async def prompt_edit_location_names(call: types.CallbackQuery, state: FSMContex
     data = await state.get_data()
     index = data["edit_index"]
     place = PLACES[index]
-
+    
     location_names = [
         line.split("<a href")[0].replace("📍", "").strip()
         for line in place["text"].splitlines()
         if line.strip().startswith("📍")
     ]
-
+    
     if not location_names:
         await call.message.answer("📍 Joylashuv nomi topilmadi!")
         return
-
-    # 1 ta bo‘lsa – darhol
+    
+    # 1 ta bo'lsa – darhol
     if len(location_names) == 1:
         await state.update_data(edit_index=index, loc_idx=0, edit_action="location_name_one")
         await call.message.answer("Yangi joylashuv nomini kiriting:")
         await state.set_state(EditDeleteRest.action)
         return
-
-    # 2+ bo‘lsa – tanlash
+    
+    # 2+ bo'lsa – tanlash
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"📍 {i}. {name}",
                               callback_data=f"edit_loc_name_{i}_{index}")]
-        for i, name in enumerate(location_names, 1)
+         for i, name in enumerate(location_names, 1)
     ])
     await call.message.answer("Qaysi joylashuv nomini tahrirlashni xohlaysiz?", reply_markup=kb)
 
@@ -2319,37 +2139,35 @@ async def save_edit_location_link(message: types.Message, state: FSMContext):
             
             # Hali ham topilmasa, matndan joy nomini aniqlash
             if lat is None:
-                # O'zining geolocator'ini yaratish (async thread safe)
                 geolocator = Nominatim(user_agent="halal_bot_location_link")
                 geo = await asyncio.to_thread(
                     geolocator.geocode,
-                    expanded_url,  # URL ni geocode qilishga urinish (ba'zi geocoderlar bunga qo'llab-quvvatlaydi)
+                    expanded_url,
                     language="en",
                     timeout=10
                 )
                 if geo and "united states" in geo.address.lower():
                     lat, lng = geo.latitude, geo.longitude
-                    
         except Exception as e:
             print(f"Geocoding fallback xatosi: {e}")
     
     # 3. Hali ham topilmasa - xato xabari
     if lat is None:
         await message.answer(
-            "❌ Havola yaroqsiz yoki koordinatalar aniqlanmadi!\n\n"
+            "❌ Havola yaroqsiz yoki koordinatalar aniqlanmadi!\n"
             "Iltimos, quyidagi usullardan birini tanlang:\n"
             "1. <b>Boshqa Google Maps havolasi</b> (uzun havola bo'lsa yaxshi)\n"
             "2. <b>Lokatsiya yuborish</b> (📍 kunikmasi orqali)\n"
             "3. <b>Koordinatalarni qo'lda yuborish</b> (masalan: 38.6170,-121.5380)"
         )
         return
-
-    # SQLite + PLACES yangilash
+    
+    # PostgreSQL + PLACES yangilash
     PLACES[idx]["lat"] = lat
     PLACES[idx]["lng"] = lng
     await update_place_field_in_db(PLACES[idx]["id"], "lat", lat)
     await update_place_field_in_db(PLACES[idx]["id"], "lng", lng)
-
+    
     # Matndagi havolani almashtirish
     for key in ('text_user', 'text_channel'):
         if key not in PLACES[idx]:
@@ -2364,7 +2182,7 @@ async def save_edit_location_link(message: types.Message, state: FSMContext):
         )
         PLACES[idx][key] = new
         await update_place_field_in_db(PLACES[idx]["id"], key, new)
-
+    
     await reload_single_place_in_memory(PLACES[idx]["id"])
     await message.answer(
         f"✅ Joylashuv havolasi yangilandi:\n"
@@ -2373,18 +2191,15 @@ async def save_edit_location_link(message: types.Message, state: FSMContext):
     )
     await state.clear()
 
-
-
 @dp.message(EditDeleteRest.action, F.text)
 async def save_edit_location_name(message: types.Message, state: FSMContext):
     data = await state.get_data()
     idx = data['edit_index']
     new_name = message.text.strip()
-
+    
     for key in ('text', 'text_user', 'text_channel'):
         if key not in PLACES[idx]:
             continue
-
         old_text = PLACES[idx][key]
         # 📍 <a href="...">ESKI_NOM</a> → 📍 <a href="...">YANGI_NOM</a>
         new_text = re.sub(
@@ -2394,44 +2209,41 @@ async def save_edit_location_name(message: types.Message, state: FSMContext):
             flags=re.IGNORECASE
         )
         PLACES[idx][key] = new_text
-
-
+    
     await message.answer(f"✅ Joylashuv nomi yangilandi: {new_name}")
-    await update_place_field_in_db(PLACES[idx]["id"], "text_user",  PLACES[idx]["text_user"])
+    await update_place_field_in_db(PLACES[idx]["id"], "text_user", PLACES[idx]["text_user"])
     await update_place_field_in_db(PLACES[idx]["id"], "text_channel", PLACES[idx]["text_channel"])
-    await reload_single_place_in_memory(PLACES[idx]["id"])   # ← qo‘shing
+    await reload_single_place_in_memory(PLACES[idx]["id"])
     await state.clear()
 
 def extract_links(text: str) -> list[str]:
     return re.findall(r'<a href="([^"]+)"', text)
-
 
 # ---------------- location-link ni tahrirlash ----------------
 @dp.callback_query(F.data.startswith("edit_location_links_"))
 async def prompt_edit_location_links(call: types.CallbackQuery, state: FSMContext):
     edit_index = int(call.data.split("_")[-1])
     place = PLACES[edit_index]
-
     txt = place.get("text_user", place.get("text_channel", place.get("text", "")))
     links = extract_location_links(txt)
-
+    
     if not links:
         await call.answer("📍 Joylashuv havolasi topilmadi!", show_alert=True)
         return
-
+    
     await state.update_data(edit_index=edit_index)
-
-    # 1 ta bo‘lsa – darhol
+    
+    # 1 ta bo'lsa – darhol
     if len(links) == 1:
         await state.set_state(EditDeleteRest.waiting_location_link)
-        await call.message.answer(f"🔗 Hozirgi havola:\n{links[0]}\n\nYangi havolani yuboring:")
+        await call.message.answer(f"🔗 Hozirgi havola:\n{links[0]}\nYangi havolani yuboring:")
         return
-
-    # 2+ bo‘lsa – tanlash
+    
+    # 2+ bo'lsa – tanlash
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"🔗 {i}. {link[:30]}...",
                               callback_data=f"edit_location_link_{i}_{edit_index}")]
-        for i, link in enumerate(links, 1)
+         for i, link in enumerate(links, 1)
     ])
     await call.message.answer("Qaysi havolani tahrirlaysiz?", reply_markup=kb)
 
@@ -2440,11 +2252,9 @@ async def select_location_link_to_edit(call: types.CallbackQuery, state: FSMCont
     parts = call.data.split("_")
     idx = int(parts[3])          # havola indeksi (1-bazada)
     index = int(parts[4])        # restoran indeksi (0-bazada)
-
     await state.update_data(edit_index=index, location_idx=idx)
-    await state.set_state(EditDeleteRest.waiting_location_link)  # ← NEW
+    await state.set_state(EditDeleteRest.waiting_location_link)
     await call.message.answer("Yangi joylashuv havolasini yuboring:")
-
 
 def extract_location_links(text: str) -> list[str]:
     """
@@ -2454,11 +2264,10 @@ def extract_location_links(text: str) -> list[str]:
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("📍"):
-            # href="..." yoki href='...'  ikkala tirnoqni ham qo‘llab o‘tamiz
+            # href="..." yoki href='...' ikkala tirnoqni ham qo'llab o'lamiz
             found = re.findall(r'<a\s+href\s*=\s*(["\'])(.*?)\1', line, flags=re.I)
             links.extend([url for _, url in found])
     return links
-
 
 @dp.callback_query(F.data == "edit_details")
 async def prompt_edit_details(call: types.CallbackQuery, state: FSMContext):
@@ -2466,26 +2275,26 @@ async def prompt_edit_details(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(EditDeleteRest.action)
     await state.update_data(edit_action="details")
 
-
 @dp.message(EditDeleteRest.action, F.text)
 async def save_edit_details(message: types.Message, state: FSMContext):
     idx = (await state.get_data())['edit_index']
     new_details = message.text.strip()
-
+    
     for key in ('text', 'text_user', 'text_channel'):
         if key not in PLACES[idx]:
             continue
         PLACES[idx][key] = replace_after_location_link(PLACES[idx][key], new_details)
+    
     await message.answer("✅ Tafsilotlar yangilandi.")
-    await update_place_field_in_db(PLACES[idx]["id"], "text_user",  PLACES[idx]["text_user"])
+    await update_place_field_in_db(PLACES[idx]["id"], "text_user", PLACES[idx]["text_user"])
     await update_place_field_in_db(PLACES[idx]["id"], "text_channel", PLACES[idx]["text_channel"])
-    await reload_single_place_in_memory(PLACES[idx]["id"])   # ← qo‘shing
+    await reload_single_place_in_memory(PLACES[idx]["id"])
     await state.clear()
 
 def replace_after_location_link(html: str, new_details: str) -> str:
     """
-    📍 ... </a> dan keyingi matnni 📋 (yoki 🌐) gacha bo‘lgan qismni
-    to‘liq yangi tafsilotlar bilan almashtiradi.
+    📍 ... </a> dan keyingi matnni 📋 (yoki 🌐) gacha bo'lgan qismni
+    to'liq yangi tafsilotlar bilan almashtiradi.
     """
     # 1-variant: 📋 bilan tugaydi
     if re.search(r'📍.*?</a>\s*\n.*?\n📋', html, flags=re.S):
@@ -2503,11 +2312,8 @@ def replace_after_location_link(html: str, new_details: str) -> str:
             html,
             flags=re.S
         )
-    # 3-variant: hech qanday belgi yo‘q – oxiriga qo‘shamiz
+    # 3-variant: hech qanday belgi yo'q – oxiriga qo'shamiz
     return html
-
-
-
 
 @dp.callback_query(F.data == "edit_menu_num")
 async def prompt_edit_menu_num(call: types.CallbackQuery, state: FSMContext):
@@ -2515,13 +2321,11 @@ async def prompt_edit_menu_num(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(EditDeleteRest.action)
     await state.update_data(edit_action="menu_num")
 
-
-
 @dp.message(EditDeleteRest.action, F.text.regexp(r'^\d+$'))
 async def save_edit_menu_num(message: types.Message, state: FSMContext):
     idx = (await state.get_data())['edit_index']
     new_num = message.text.strip()
-
+    
     for key in ('text', 'text_user', 'text_channel'):
         if key not in PLACES[idx]:
             continue
@@ -2532,14 +2336,12 @@ async def save_edit_menu_num(message: types.Message, state: FSMContext):
             PLACES[idx][key],
             flags=re.IGNORECASE
         )
-
-
+    
     await message.answer(f"✅ Menyu raqami yangilandi: {new_num}")
-    await update_place_field_in_db(PLACES[idx]["id"], "text_user",  PLACES[idx]["text_user"])
+    await update_place_field_in_db(PLACES[idx]["id"], "text_user", PLACES[idx]["text_user"])
     await update_place_field_in_db(PLACES[idx]["id"], "text_channel", PLACES[idx]["text_channel"])
-    await reload_single_place_in_memory(PLACES[idx]["id"])   # ← qo‘shing
+    await reload_single_place_in_memory(PLACES[idx]["id"])
     await state.clear()
-
 
 @dp.callback_query(F.data == "edit_phone")
 async def prompt_edit_phone(call: types.CallbackQuery, state: FSMContext):
@@ -2551,23 +2353,22 @@ async def prompt_edit_phone(call: types.CallbackQuery, state: FSMContext):
 async def save_edit_phone(message: types.Message, state: FSMContext):
     idx = (await state.get_data())['edit_index']
     new_p = message.text.strip()
-
+    
     for key in ('text', 'text_user', 'text_channel'):
         if key not in PLACES[idx]:
             continue
-        # 📞 ...  (ikkitalik raqam ham bo‘lishi mumkin)
+        # 📞 ... (ikkitalik raqam ham bo'lishi mumkin)
         PLACES[idx][key] = re.sub(
             r'📞\s*[+\d\s–()-]+',
             f'📞 {new_p}',
             PLACES[idx][key],
             flags=re.M
         )
-
-
+    
     await message.answer(f"✅ Telefon raqami yangilandi: {new_p}")
-    await update_place_field_in_db(PLACES[idx]["id"], "text_user",  PLACES[idx]["text_user"])
+    await update_place_field_in_db(PLACES[idx]["id"], "text_user", PLACES[idx]["text_user"])
     await update_place_field_in_db(PLACES[idx]["id"], "text_channel", PLACES[idx]["text_channel"])
-    await reload_single_place_in_memory(PLACES[idx]["id"])   # ← qo‘shing
+    await reload_single_place_in_memory(PLACES[idx]["id"])
     await state.clear()
 
 @dp.callback_query(F.data == "edit_telegram")
@@ -2580,12 +2381,11 @@ async def prompt_edit_telegram(call: types.CallbackQuery, state: FSMContext):
 async def save_edit_telegram(message: types.Message, state: FSMContext):
     idx = (await state.get_data())['edit_index']
     new_u = message.text.strip()
-
     # format tekshiruvi
     if not re.match(r'^@\w{3,}$', new_u):
-        await message.answer("❌ Iltimos, to‘g‘ri formatda kiriting (@foydalanuvchi):")
+        await message.answer("❌ Iltimos, to'g'ri formatda kiriting (@foydalanuvchi):")
         return
-
+    
     for key in ('text', 'text_user', 'text_channel'):
         if key not in PLACES[idx]:
             continue
@@ -2596,19 +2396,18 @@ async def save_edit_telegram(message: types.Message, state: FSMContext):
             PLACES[idx][key],
             flags=re.M | re.I
         )
-
-
+    
     await message.answer(f"✅ Telegram username yangilandi: {new_u}")
-    await update_place_field_in_db(PLACES[idx]["id"], "text_user",  PLACES[idx]["text_user"])
+    await update_place_field_in_db(PLACES[idx]["id"], "text_user", PLACES[idx]["text_user"])
     await update_place_field_in_db(PLACES[idx]["id"], "text_channel", PLACES[idx]["text_channel"])
-    await reload_single_place_in_memory(PLACES[idx]["id"])   # ← qo‘shing
+    await reload_single_place_in_memory(PLACES[idx]["id"])
     await state.clear()
 
 # ---------------- 📝 Qo'shimcha tahrirlash ----------------
 @dp.callback_query(F.data == "edit_extra")
 async def prompt_edit_extra(call: types.CallbackQuery, state: FSMContext):
-    await call.answer()  # loading to‘xtatadi
-    await call.message.answer("📝 Yangi qoʻshimcha ma’lumotni kiriting:")
+    await call.answer()
+    await call.message.answer("📝 Yangi qo'shimcha ma'lumotni kiriting:")
     await state.set_state(EditDeleteRest.action)
     await state.update_data(edit_action="extra")
 
@@ -2616,34 +2415,34 @@ async def prompt_edit_extra(call: types.CallbackQuery, state: FSMContext):
 async def save_edit_extra(message: types.Message, state: FSMContext):
     idx = (await state.get_data())['edit_index']
     new_e = message.text.strip()
-
+    
     for key in ('text', 'text_user', 'text_channel'):
         if key not in PLACES[idx]:
             continue
         if re.search(r'^📝 Q.*?shimcha:', PLACES[idx][key], flags=re.M):
             PLACES[idx][key] = re.sub(
                 r'^📝 Q.*?shimcha:.*$',
-                f'📝 Qoʻshimcha: {new_e}',
+                f'📝 Qo\'shimcha: {new_e}',
                 PLACES[idx][key],
                 flags=re.M
             )
         else:
-            PLACES[idx][key] += f'\n📝 Qoʻshimcha: {new_e}'
-
-    # SQLite ga yozamiz
+            PLACES[idx][key] += f'\n📝 Qo\'shimcha: {new_e}'
+    
+    # PostgreSQL ga yozamiz
     await update_place_field_in_db(PLACES[idx]["id"], "text_user", PLACES[idx]["text_user"])
     await update_place_field_in_db(PLACES[idx]["id"], "text_channel", PLACES[idx]["text_channel"])
-
-    await message.answer("✅ Qoʻshimcha yangilandi.")
-    await reload_single_place_in_memory(PLACES[idx]["id"])   # ← qo‘shing
-    await state.clear() 
-
+    
+    await message.answer("✅ Qo'shimcha yangilandi.")
+    await reload_single_place_in_memory(PLACES[idx]["id"])
+    await state.clear()
 
 # ---------------- o'chirish ----------------
 @dp.callback_query(F.data.startswith("delete_"))
 async def confirm_delete_rest(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
     index = int(call.data.split("_")[1])
+    
     if 0 <= index < len(PLACES):
         place = PLACES[index]
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -2651,20 +2450,22 @@ async def confirm_delete_rest(call: types.CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_delete")]
         ])
         display_text = get_display_text(place)
-        await call.message.answer(f"Quyidagi restoranni o'chirishni xohlaysizmi?\n\n{display_text}", reply_markup=keyboard)
+        await call.message.answer(f"Quyidagi restoranni o'chirishni xohlaysizmi?\n{display_text}", reply_markup=keyboard)
     else:
         await call.message.answer("❌ Noto'g'ri raqam.")
 
 @dp.callback_query(F.data.startswith("confirm_delete_"))
 async def confirm_delete_rest_final(call: types.CallbackQuery, state: FSMContext):
     index = int(call.data.split("_")[2])
+    
     if 0 <= index < len(PLACES):
         place = PLACES.pop(index)
-        # SQLite dan ham o‘chiramiz
+        # PostgreSQL dan ham o'chiramiz
         await delete_place_from_db(place["id"])
         await call.message.edit_text(f"✅ {place['name']} o'chirildi.")
     else:
-        await call.message.edit_text("❌ Noto‘g‘ri raqam.")
+        await call.message.edit_text("❌ Noto'g'ri raqam.")
+    
     await state.clear()
 
 @dp.callback_query(F.data == "cancel_delete")
@@ -2673,22 +2474,22 @@ async def cancel_delete(call: types.CallbackQuery, state: FSMContext):
     await state.clear()
 
 # ---------- yangi yordamchi ----------
-
 @dp.callback_query(F.data == "start_swap")
 async def start_swap(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
     await call.message.answer("1️⃣ <b>Birinchi restoran raqamini kiriting</b> (qaysi raqamda turganini):")
     await state.set_state(SwapLocation.waiting_first)
 
-@dp.message(SwapLocation.waiting_first, F.text.isdigit)
+@dp.message(SwapLocation.waiting_first, F.text.isdigit())
 async def got_first_number(message: types.Message, state: FSMContext):
     first = int(message.text)
     if not (1 <= first <= len(PLACES)):
         await message.answer("❌ Bunday raqam mavjud emas. Qayta kiriting:")
         return
+    
     await state.update_data(first=first)
-    await message.answer(f"✅ Tanlandi: <b>{PLACES[first-1]['name']}</b>\n\n"
-                         "2️⃣ <b>Ikkinchi restoran raqamini kiriting</b> (qaysi raqamga koʻchirish kerak):")
+    await message.answer(f"✅ Tanlandi: <b>{PLACES[first-1]['name']}</b>\n"
+                         "2️⃣ <b>Ikkinchi restoran raqamini kiriting</b> (qaysi raqamga ko'chirish kerak):")
     await state.set_state(SwapLocation.waiting_second)
 
 @dp.message(SwapLocation.waiting_second, F.text.isdigit())
@@ -2696,39 +2497,43 @@ async def got_second_number(message: types.Message, state: FSMContext):
     second = int(message.text)
     data = await state.get_data()
     first = data["first"]
-
+    
     if not (1 <= second <= len(PLACES)):
         await message.answer("❌ Bunday raqam mavjud emas. Qayta kiriting:")
         return
+    
     if first == second:
         await message.answer("❌ Xuddi shu raqam! Qayta kiriting:")
         return
-
+    
     # 0-bazadagi indekslar
     idx1, idx2 = first - 1, second - 1
     p1, p2 = PLACES[idx1], PLACES[idx2]
-
-    # DB da almashtirish
-    success = await swap_places_in_db(p1["id"], p2["id"])
     
-    if success:
-        # Memory da almashtirish
-        p1["text_user"], p2["text_user"] = p2["text_user"], p1["text_user"]
-        p1["text_channel"], p2["text_channel"] = p2["text_channel"], p1["text_channel"]
-        p1["text"], p2["text"] = p2["text"], p1["text"]
-        p1["name"], p2["name"] = p2["name"], p1["name"]
-
-        await message.answer(
-            f"✅ <b>{first}</b> va <b>{second}</b> oʻrinlari muvaffaqiyatli almashdi!\n"
-            f"Endi «Nashville» kabi so‘rovda yangi tartibda koʻrinadi.",
-            reply_markup=admin_main_menu_ikb()
-        )
-    else:
-        await message.answer("❌ Xatolik yuz berdi. Qayta urinib ko'ring.")
+    # matnlar va nomlar almashadi
+    p1["text_user"], p2["text_user"] = p2["text_user"], p1["text_user"]
+    p1["text_channel"], p2["text_channel"] = p2["text_channel"], p1["text_channel"]
+    p1["text"], p2["text"] = p2["text"], p1["text"]
+    p1["name"], p2["name"] = p2["name"], p1["name"]
     
+    # PostgreSQL yangilash
+    await execute(
+        "UPDATE places SET name=$1, text_user=$2, text_channel=$3 WHERE id=$4",
+        p1["name"], p1["text_user"], p1["text_channel"], p1["id"]
+    )
+    await execute(
+        "UPDATE places SET name=$1, text_user=$2, text_channel=$3 WHERE id=$4",
+        p2["name"], p2["text_user"], p2["text_channel"], p2["id"]
+    )
+    
+    await message.answer(
+        f"✅ <b>{first}</b> va <b>{second}</b> o'rinlari muvaffaqiyatli almashdi!\n"
+        f"Endi «Nashville» kabi so'rovda yangi tartibda ko'rinadi.",
+        reply_markup=admin_main_menu_ikb()
+    )
     await state.clear()
 
-# noto‘g‘ri kiritma uchun
+# noto'g'ri kiritma uchun
 @dp.message(SwapLocation.waiting_first, SwapLocation.waiting_second)
 async def swap_wrong_input(message: types.Message):
     await message.answer("❌ Iltimos, faqat raqam kiriting.")
@@ -2736,54 +2541,56 @@ async def swap_wrong_input(message: types.Message):
 def is_ad(text: str) -> bool:
     """
     Reklama ekanligini aniqlaydi.
-    1-2 so‘zlik matn (shahar, shtat, truk-stop nomi) → reklama emas.
+    1-2 so'zlik matn (shahar, shtat, truk-stop nomi) → reklama emas.
     Havola / username / uzun biznes-emoji matn → reklama.
     """
     if not text:
         return False
-
+    
     t = text.strip()
-
-    # 1) 1-2 so‘zdan iborat bo‘lsa – reklama emas (shahar/so‘rov)
+    
+    # 1) 1-2 so'zdan iborat bo'lsa – reklama emas (shahar/so'rov)
     if len(t.split()) <= 2:
         return False
-
-    # 2) havola / username bo‘lsa → reklama
+    
+    # 2) havola / username bo'lsa → reklama
     if re.search(r'https?://|t\.me/|@', t):
         return True
-
+    
     # 3) faqat biznes emoji-lari bilan yozilgan 3+ qator
     lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
     if len(lines) >= 3 and all(
         re.match(r'^\s*(🍽|📍|📞|⏰|🚗|📃|📱|✨|•)', ln) for ln in lines
     ):
         return True
-
+    
     # 4) 300+ belgili va shahar/shtat nomi bor – lekin 1-band oldinroq qaytadi
     if len(t) > 300:
         return True
-
+    
     return False
+
 def get_display_text(place):
     # Avval "text_user", keyin "text_channel", keyin esa eski "text" kalitini qidiradi
     return place.get("text_user", place.get("text_channel", place.get("text", "")))
 
-
 def split_text(text: str, limit: int = 4000) -> list[str]:
-    """Katta matnni Telegram chegarasiga mos bo‘laklarga bo‘lib beradi."""
+    """Katta matnni Telegram chegarasiga mos bo'laklarga bo'lib beradi."""
     if len(text) <= limit:
         return [text]
+    
     parts = []
     while text:
-        split_at = text[:limit].rfind('\n\n')   # ikki yangi qator orqali bo‘lamiz
+        split_at = text[:limit].rfind('\n\n\n')   # ikki yangi qator orqali bo'lamiz
         if split_at == -1:
             split_at = limit
         parts.append(text[:split_at])
         text = text[split_at:].lstrip()
+    
     return parts
 
 async def reply_long_text(message: types.Message, text: str) -> None:
-    """Katta matnni 4000 belgi bo‘laklama, reply qilib yuboradi."""
+    """Katta matnni 4000 belgi bo'laklama, reply qilib yuboradi."""
     for part in split_text(text, limit=4000):
         await message.answer(
             part,
@@ -2795,10 +2602,10 @@ async def reply_long_text(message: types.Message, text: str) -> None:
 async def location_handler(message: types.Message):
     await by_location(message)
 
-
 async def by_location(message: types.Message):
     lat, lng = message.location.latitude, message.location.longitude
     near = [p for p in PLACES if haversine(lat, lng, p["lat"], p["lng"]) <= 100]
+    
     if not near:
         await message.answer(
             "📍 100 km radiusda hech qanday muassasa yo'q.\n"
@@ -2807,19 +2614,15 @@ async def by_location(message: types.Message):
             reply_to_message_id=message.message_id
         )
         return
-
-    out = "\n\n".join(get_display_text(p) for p in near)
-    # uzun bo‘lsa bo‘laklama yuboramiz
+    
+    out = "\n".join(get_display_text(p) for p in near)
+    # uzun bo'lsa bo'laklama yuboramiz
     for part in split_text(out):
         await message.answer(
             part,
             reply_to_message_id=message.message_id,
             disable_web_page_preview=True
         )
-# ---------------- guruhda joylashuvga o‘xshash matnmi? ----------------
-
-# ---------- REKLAMA (is_ad) ----------
-
 
 # ---------- STATE CODES (2-harfli shtat kodlari) ----------
 STATE_CODES = {
@@ -2839,22 +2642,21 @@ STATE_CODES = {
 }
 
 def normalize_text(text: str) -> str:
-    """2-harfli shtat kodlarini to‘liq nomga almashtiradi va 2 harfdan kam so‘zlarni o‘chiradi."""
+    """2-harfli shtat kodlarini to'liq nomga almashtiradi va 2 harfdan kam so'zlarni o'chiradi."""
     words = re.findall(r'\b\w+\b', text.lower())
     out = []
     for w in words:
         if len(w) == 2 and w in STATE_CODES:
             out.append(STATE_CODES[w])
-        elif len(w) <= 2:          # 2 harfdan kam boʻlsa tashlab yuboramiz
+        elif len(w) <= 2:          # 2 harfdan kam bo'lsa tashlab yuboramiz
             continue
         else:
             out.append(w)
     return " ".join(out)
 
-
 # ---------- 1-a. oddiy tozalash ----------
 def strip_greeting(text: str) -> str:
-    """Assalomu alaykum, hello, hi, привет, салом... va so‘roq belgisini o‘chiradi."""
+    """Assalomu alaykum, hello, hi, привет, салом... va so'roq belgisini o'chiradi."""
     t = re.sub(
         r'^\s*(assalomu alaykum|asss?alom|hello|hi|привет|салом|assalom|aleykum|alaykum)\s*',
         '', text, flags=re.I
@@ -2884,31 +2686,16 @@ async def ai_normalize(text: str) -> str:
     except Exception:
         return t.title() + ", USA"
 
-
-# ---------- 2. coords_from_any ichiga qoʻshimcha ----------
+# ---------- 2. coords_from_any ichiga qo'shimcha ----------
 async def coords_from_any(text: str):
     """
     «City, State, USA» shakliga keltirib, koordinatani topadi.
     """
-    # 1) qisqa nomlarni to‘ldirish (siz allaqachon yozib qo‘ygansiz)
+    # 1) qisqa nomlarni to'ldirish
     t = await ai_normalize(text)
-
     # 2) geocoder
     lat, lng = await geocode_with_retry(t)
     return lat, lng
-
-# ---------- 4a. AI dan oldin «matndan shahar» ajratuvchi qo‘shimcha ----------
-# CITY_PAT ni quyidagi ko'rinishda yangilang
-CITY_PAT = re.compile(
-    r'\b(' + '|'.join(
-        # 1) 50 shtat nomlari
-        'alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming|'
-        # 2) eng mashhur shaharlar (kichik harflarda)
-        'ontario|sacramento|los angeles|chicago|houston|phoenix|philadelphia|san antonio|san diego|dallas|san jose|austin|jacksonville|fort worth|columbus|charlotte|san francisco|indianapolis|seattle|denver|washington|boston|el paso|detroit|nashville|portland|oklahoma city|las vegas|louisville|baltimore|milwaukee|albuquerque|tucson|fresno|mesa|kansas city|atlanta|omaha|colorado springs|raleigh|miami|virginia beach|oakland|minneapolis|tulsa|arlington|wichita|bakersfield|tampa|aurora|anaheim|honolulu|riverside|corpus christi|lexington|stockton|henderson|saint paul|st paul|cincinnati|pittsburgh|greensboro|anchorage|plano|lincoln|orlando|irvine|newark|toledo|durham|chula vista|fort wayne|jersey city|st petersburg|norfolk|laredo|winston salem|chandler|madison|lubbock|scottsdale|reno|gilbert|glendale|buffalo|north las vegas|chesapeake|garland|baton rouge|irving|hialeah|richmond|fremont|boise|spokane|des moines|modesto|fayetteville|tacoma|oxnard|fontana|columbus ga|montgomery|moreno valley|shreveport|aurora il|yonkers|akron|augusta|grand rapids|little rock|amarillo|huntington beach|glendale az|overland park|aurora co|tallahassee|mobile|grand prairie|columbus ga|vancouver|knoxville|brownsville|providence|fort lauderdale|salt lake city|santa clarita|newport news|springfield mo|jackson ms|santa rosa|pembroke pines|elk grove|salem|rancho cucamonga|eugene|oceanside|clarksville|garden grove|lancaster ca|springfield il|corona|hayward|palmdale|lakewood co|springfield ma|salinas|alexandria va|paterson|sunnyvale|hollywood|joliet|kansas|kansas city|san bernardino|ontario ca|ontario|tempe|escondido|bridgeport|orange|warren mi|cary nc|fullerton|cedar rapids|dayton|sterling heights|new haven|topeka|columbia sc|thousand oaks|el monte|norman|vallejo|thorton|independence|ann arbor|hartford|wichita falls|fairfield ca|berkeley|cambridge|clearwater|peoria|lansing|westminster|downey|waterbury|costa mesa|manchester nh|miami gardens|manchester ct|west jordan|round rock|gainesville|elgin|charleston sc|murfreesboro|league city|north charleston|beaumont|portsmouth|billings|west covina|arvada|fairfield oh|wichita|lowell|ventura|pueblo|daly city|burbank|richardson|erie|rialto|boulder|west palm beach|broken arrow|pearland|lakeland fl|santa maria|lewisville|south bend|lakewood wa|rochester mn|dearborn|roswell|lee summit|new bedford|inglewood|lee\'s summit|federal way|roanoke|portsmouth|lynn|lawrence ks|santa fe|davie|fall river|reading|livonia|college station|miami beach|rochester hills|sandy springs|sparks|boca raton|wellington|compton|sunrise|plantation|greeley|mcallen|brookhaven|albany ny|kalamazoo|nampa|bryan|bend|davie|boca raton|deltona|racine|rogers ar|rogers|janesville|westland|sioux falls|champaign|dekalb|fargo|utica|suffolk|clovis|roanoke|kenosha|appleton|duluth|lynchburg|kalamazoo|bloomington in|bloomington|renton|redlands|st charles|st cloud|st george|st joseph|st louis|st petersburg|st paul|st peters|st clair shores|st charles mo|st cloud mn|st joseph mo|st louis mo|st peters mo'
-    ) + r')\b',
-    flags=re.I
-)
-
 
 
 
@@ -2976,35 +2763,79 @@ async def by_text(message: types.Message):
 
 
 
-# ---------------- run ----------------
-async def main():
-    global PLACES, db_pool
-    
-    # DB ulanish
-    await init_db()
+async def ai_extract_city(text: str) -> str:
+    """
+    Matndan AQSh shahar yoki shtat nomini ajratadi.
+    Har qanday shahar uchun ishlaydi (kichik yoki katta).
+    """
+    t = strip_greeting(text).strip()
+    if not t or len(t) < 2:
+        return ""
     
     try:
+        r = await ai.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system",
+                 "content": (
+                     "You are a US location extractor. The text can be in Uzbek, Russian or English. "
+                     "Extract the US city name or state name. "
+                     "IMPORTANT: It can be ANY US city, not just famous ones (New York, LA). "
+                     "Small cities like 'Columbia Missouri', 'El Paso', 'Knoxville', 'Ann Arbor' etc. are also valid. "
+                     "Examples:\n"
+                     "- 'menga kansas city dan ovqat kerak' -> Kansas City, Missouri, USA\n"
+                     "- 'нужна еда из маленького городка в техасе' -> Texas (or specific city if mentioned)\n"
+                     "- 'man columbia modaman' -> Columbia, Missouri, USA\n"
+                     "- 'ovqat yetkazib berish austin tx' -> Austin, Texas, USA\n"
+                     "- 'send las vegas food' -> Las Vegas, Nevada, USA\n"
+                     "Format: 'City, State, USA' or 'City, USA'. "
+                     "If no US location: reply EMPTY"
+                 )},
+                {"role": "user", "content": t}
+            ],
+            temperature=0,
+            max_tokens=50
+        )
+        result = r.choices[0].message.content.strip()
+        
+        # AI "EMPTY" deb qaytarganini tekshirish
+        if result.upper() in ["EMPTY", "NONE", "NULL"] or not result or len(result) < 2:
+            return ""
+        
+        # Agar javobda "USA" bo'lmasa, qo'shib qo'yish
+        if "usa" not in result.lower():
+            result += ", USA"
+        
+        return result
+    except Exception as e:
+        print(f"AI extraction error: {e}")
+        return ""
+
+# ---------------- run ----------------
+async def main():
+    global PLACES
+    
+    # 1. PostgreSQL pool ni boshlash
+    await init_db_pool()
+    
+    # 2. Ma'lumotlarni yuklash
+    PLACES = await load_places_from_db()
+    
+    if not PLACES:
+        for p in initial_places:
+            await add_place_to_db(
+                p["name"], p["lat"], p["lng"],
+                p["text"], p["text"]
+            )
         PLACES = await load_places_from_db()
-        
-        # Agar bo'sh bo'lsa, initial ma'lumotlarni qo'shish
-        if not PLACES:
-            for p in initial_places:
-                await add_place_to_db(
-                    p["name"], p["lat"], p["lng"],
-                    p["text"], p["text"]
-                )
-            PLACES = await load_places_from_db()
-        
-        # PLACES formatini moslashtirish (id kalitini qo'shish)
-        for i, place in enumerate(PLACES):
-            if 'id' not in place:
-                place['id'] = i + 1  # Yoki DB dan qayta yuklash
-        
+    
+    # 3. Botni ishga tushurish
+    print("🚀 Bot ishga tushdi!")
+    try:
         await dp.start_polling(bot, skip_updates=True)
     finally:
+        # Bot to'xtaganda database ni yopish
         await close_db()
-
-
 
 if __name__ == "__main__":
     asyncio.run(main())
