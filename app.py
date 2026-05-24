@@ -4,11 +4,11 @@ import sys
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+    InlineKeyboardMarkup, InlineKeyboardButton
 )
 from geopy.geocoders import Nominatim
 import spacy
@@ -19,10 +19,6 @@ load_dotenv()
 import openai, os
 from openai import AsyncOpenAI
 ai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-from datetime import datetime
-import io
-from places_data import initial_places
 
 
 # ---------------- konfig ----------------
@@ -173,7 +169,7 @@ async def add_blacklist_word(word: str):
             word.lower()
         )
 
-async def remove_blacklist_word(word: str):
+async def delete_blacklist_word(word: str):
     """So'zni qora ro'yxatdan o'chirish"""
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM blacklist WHERE word = $1", word)
@@ -244,17 +240,11 @@ def is_gibberish(text: str) -> bool:
 
 
 async def add_place_to_db(name: str, lat: float, lng: float, text_user: str, text_channel: str) -> int:
-    """Yangi joy qo'shish va uning ID sini qaytarish"""
-    global db_pool
-    
-    if db_pool is None:
-        await init_db()
-    
+    """Yangi joy qo'shish, ID qaytaradi"""
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
             """INSERT INTO places (name, lat, lng, text_user, text_channel) 
-               VALUES ($1, $2, $3, $4, $5) 
-               RETURNING id""",
+               VALUES ($1, $2, $3, $4, $5) RETURNING id""",
             name, lat, lng, text_user, text_channel
         )
         return row['id']
@@ -310,10 +300,7 @@ async def delete_place_from_db(place_id: int):
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM places WHERE id = $1", place_id)
 
-
-# ✅ PLACES ni bot ishga tushishi bilan yuklaymiz
-PLACES = []  # boshlang'ich qiymat
-
+# Windows vs Linux ajratmasdan, har doim bot papkasida saqlaymiz
 
 async def ai_extract_city(text: str) -> str:
     """
@@ -363,12 +350,1087 @@ async def ai_extract_city(text: str) -> str:
         print(f"AI extraction error: {e}")
         return ""
 
+# ✅ app.py boshiga (allqachon bor, lekin to‘liq)
+async def load_places():
+    rows = await load_places_from_db()
+    if rows is None:                       # birinchi marta
+        for p in initial_places:
+            await add_place_to_db(
+                p["name"], p["lat"], p["lng"],
+                p["text"],                 # text_user
+                p["text"]                  # text_channel
+            )
+        rows = await load_places_from_db()
+    return rows
+
+# ✅ PLACES ni bot ishga tushishi bilan yuklaymiz
+PLACES = []  # boshlang'ich qiymat
+
+
+
+initial_places = [
+            {
+                "name": "CHAIHANA-AMIR",
+                "lat": 38.61700400,
+                "lng": -121.53797100,
+                "text": (
+                    "🍽️ <b>CHAIHANA-AMIR</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=38.61700400 ,-121.53797100">Sacramento, CA</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 2–3 ч до доставки\n"
+                    "⏰ 24/7\n"
+                    "🚘 Доставка есть\n"
+                    "📞 +19167506977  +19169405677\n"
+                    '📋 <a href="https://t.me/myhalalmenu/8 ">Меню</a>\n'
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )          
+            },
+            {
+                "name": "XADICHAI-KUBRO",
+                "lat": 38.61708200,
+                "lng": -121.53778900,
+                "text": (
+                    "🍽️ <b>XADICHAI-KUBRO</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=38.61708200 ,-121.53778900">Sacramento, CA</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 6–7 ч до доставки\n"
+                    "⏰ 08:00 – 19:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/9 ">Меню</a> (в комментариях)\n'
+                    "📞 +12797901986\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "UMAR-UZBEK-NATIONAL-FOOD",
+                "lat": 38.61700400,
+                "lng": -121.53797100,
+                "text": (
+                    "🍽️ <b>UMAR UZBEK NATIONAL FOOD</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=38.61700400 ,-121.53797100">Sacramento, CA</a>\n'
+                    "🏠 Домашняя кухня\n"
+                    "🧾 Заказы за 4–5 ч до доставки\n"
+                    "⏰ 10:00 – 20:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/10 ">Меню</a> (в комментариях)\n'
+                    "📞 +19165333778\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "RANO-OPA-KITCHEN",
+                "lat": 37.80681200,
+                "lng": -122.41256100,
+                "text": (
+                    "🍽️ <b>RANO OPA KITCHEN – HALOL MILLIY UZBEK TAOMLARI</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=37.80681200 ,-122.41256100">San Francisco, CA</a>\n'
+                    "🏠 Домашняя кухня\n"
+                    "🧾 Заказы за 3–4 ч до доставки\n"
+                    "⏰ 10:00 – 22:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/11 ">Меню</a> (в комментариях)\n'
+                    "📞 +15107782614\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "DENVER-HALAL-FOOD",
+                "lat": 39.79106000,
+                "lng": -104.90467400,
+                "text": (
+                    "🍽️ <b>DENVER HALAL FOOD</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=39.79106000 ,-104.90467400">Denver, CO</a>\n'
+                    "🏠 Домашняя кухня\n"
+                    "🧾 Заказы за 3–4 ч до доставки\n"
+                    "⏰ 09:00 – 00:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/12 ">Меню</a> (в комментариях)\n'
+                    "📞 +17207564155\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "TRUCKERS-HALAL-FOOD",
+                "lat": 39.73438200,
+                "lng": -104.84645600,
+                "text": (
+                    "🍽️ <b>TRUCKERS HALAL FOOD</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=39.73438200 ,-104.84645600">Denver, CO</a>\n'
+                    "🏠 Домашняя кухня\n"
+                    "🧾 Заказы за 3–4 ч до доставки\n"
+                    "⏰ 08:00 – 00:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/13 ">Меню</a> (в комментариях)\n'
+                    "📞 +17209935823\n"
+                    "📱 Telegram: @MYHALAL_FOOD, @Denverfood"
+                )
+            },
+            {
+                "name": "BAUYRSAQ-EXPRESS",
+                "lat": 47.24476600,
+                "lng": -122.38548700,
+                "text": (
+                    "🍽️ <b>BAUYRSAQ EXPRESS – Uzbek · Kazakh · Kirgiz kitchen</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=47.24476600 ,-122.38548700">Tacoma, WA</a>\n'
+                    "🏠 Домашняя кухня\n"
+                    "🧾 Заказы за 2–3 ч до доставки\n"
+                    "⏰ 24/7\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/14 ">Меню</a> (в комментариях)\n'
+                    "📞 +14257577206\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "ASIA-HALAL-FOOD",
+                "lat": 47.24476600,
+                "lng": -122.38548700,
+                "text": (
+                    "🍽️ <b>ASIA HALAL FOOD</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=47.24476600 ,-122.38548700">Tacoma, WA</a>\n'
+                    "🏠 Домашняя кухня\n"
+                    "🧾 Продукты готовы, можно купить сразу\n"
+                    "⏰ 24/7\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/15 ">Меню</a> (в комментариях)\n'
+                    "📞 +18782294148  +18782294149\n"
+                    "📱 Telegram: @MYHALAL_FOOD, @AsiaHalalFood"
+                )
+            },
+            {
+                "name": "UZBEK-HALOL-FOOD",
+                "lat": 47.24476600,
+                "lng": -122.38548700,
+                "text": (
+                    "🍽️ <b>UZBEK HALOL FOOD</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=47.24476600 ,-122.38548700">Tacoma, WA</a>\n'
+                    "🏠 Домашняя кухня\n"
+                    "🧾 Продукты готовы, можно купить сразу\n"
+                    "⏰ 08:00 – 22:00\n"
+                    "🚘 Доставка бесплатно\n"
+                    '📋 <a href="https://t.me/myhalalmenu/16 ">Меню</a> (в комментариях)\n'
+                    "📞 +13609306392  +12534485190\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "AMIN-FOOD",
+                "lat": 47.24476600,
+                "lng": -122.38548700,
+                "text": (
+                    "🍽️ <b>AMIN FOOD</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=47.24476600 ,-122.38548700">Tacoma, WA</a>\n'
+                    "🏠 Домашняя кухня\n"
+                    "🧾 Заказы за 3–4 ч до доставки\n"
+                    "⏰ 08:00 – 22:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/18 ">Меню</a> (в комментариях)\n'
+                    "📞 +19167380322\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "CARAVAN-RESTAURANT-2",
+                "lat": 47.66120600,
+                "lng": -122.32378600,
+                "text": (
+                    "🍽️ <b>CARAVAN RESTAURANT – 2</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=47.66120600 ,-122.32378600">Seattle, WA</a>\n'
+                    "🏠 Ресторан\n"
+                    "🗺 Адреса:\n"
+                    "— <a href=\"https://maps.app.goo.gl/RiKVT3aQoJbWZ3xg8 \">405 NE 45th St, Seattle, WA 98105</a>\n"
+                    "— <a href=\"https://maps.app.goo.gl/LrTdvgjfGZzxe2mr6 \">7801 Detroit Ave SW, Seattle, WA 98106</a>\n"
+                    "— <a href=\"https://maps.app.goo.gl/zs2dnzLgCF6h1SoC8 \">3215 4th Ave S, Seattle, WA</a>\n"
+                    "🧾 Продукты готовы, можно купить сразу\n"
+                    "⏰ 11:00 – 23:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/19 ">Меню</a> (в комментариях)\n'
+                    "📞 +12065457499\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "SADIYA-OSHXONASI",
+                "lat": 39.27019000,
+                "lng": -84.44163700,
+                "text": (
+                    "🍽️ <b>SADIYA OSHXONASI VA CAKE LAB</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=39.27019000 ,-84.44163700">Cincinnati, OH</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 3–4 ч до доставки\n"
+                    "⏰ 09:00 – 22:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/20 ">Меню</a> (в комментариях)\n'
+                    "📞 +15134449371\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "DELICIOUS-FOODS",
+                "lat": 39.26986100,
+                "lng": -84.43900900,
+                "text": (
+                    "🍽️ <b>DELICIOUS FOODS</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=39.26986100 ,-84.43900900">Cincinnati, OH</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 4 ч до доставки\n"
+                    "⏰ 09:00 – 20:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/21 ">Меню</a> (в комментариях)\n'
+                    "📞 +15134046762\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "ROBIYA-BAKERY",
+                "lat": 39.26866500,
+                "lng": -84.43942300,
+                "text": (
+                    "🍽️ <b>ROBIYA BAKERY</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=39.26866500 ,-84.43942300">Cincinnati, OH</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 4–5 ч до доставки\n"
+                    "⏰ 09:00 – 21:00\n"
+                    "🚘 Доставка по Dayton и Hebron\n"
+                    '📋 <a href="https://t.me/myhalalmenu/22 ">Меню</a> (в комментариях)\n'
+                    "📞 +15132249300\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "CHAYHANA-1",
+                "lat": 39.31210400,
+                "lng": -84.37738100,
+                "text": (
+                    "🍽️ <b>CHAYHANA №1</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=39.31210400 ,-84.37738100">Cincinnati, OH</a>\n'
+                    "🍴 Ресторан\n"
+                    "🧾 Блюда готовы, можно забрать\n"
+                    "⏰ 10:00 – 22:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/23 ">Меню</a> (в комментариях)\n'
+                    "📞 +15137550596\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "SHEF-MOM",
+                "lat": 39.38454100,
+                "lng": -84.34233300,
+                "text": (
+                    "🍽️ <b>SHEF MOM – CAKE – SUSHI</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=39.38454100 ,-84.34233300">Cincinnati, OH</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 5 ч до доставки\n"
+                    "⏰ 10:00 – 22:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/24 ">Меню</a> (в комментариях)\n'
+                    "📞 +14704000770\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "TAJIKSKO-UZBEKSKAYA-KUHNYA",
+                "lat": 41.28132000,
+                "lng": -96.21969700,
+                "text": (
+                    "🍽️ <b>Таджикско-узбекская Национальная кухня</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=41.28132000 ,-96.21969700">Omaha, NE</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 2–3 ч до доставки\n"
+                    "⏰ 24/7\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/25 ">Меню</a> (в комментариях)\n'
+                    "📞 +14026168772\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "ZARINA-FOOD",
+                "lat": 40.28957100,
+                "lng": -76.88458100,
+                "text": (
+                    "🍽️ <b>ZARINA FOOD UYGʻUR OSHXONASI</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=40.28957100 ,-76.88458100">Harrisburg, PA</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 2–3 ч до доставки\n"
+                    "⏰ 08:00 – 18:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/26 ">Меню</a> (в комментариях)\n'
+                    "📞 +17175626326\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "PIZZA-BARI",
+                "lat": 40.44370500,
+                "lng": -79.99612500,
+                "text": (
+                    "🍽️ <b>PIZZA BARI</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=40.44370500 ,-79.99612500">Pittsburgh, PA</a>\n'
+                    "🏠 Кафе\n"
+                    "🧾 Продукты готовы, можно купить сразу\n"
+                    "⏰ 10:00 – 02:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/28 ">Меню</a> (в комментариях)\n'
+                    "📞 +14124020444  +14126090714\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "MUSOJON",
+                "lat": 33.55247500,
+                "lng": -112.15317400,
+                "text": (
+                    "🍽️ <b>MUSOJON</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=33.55247500 ,-112.15317400">Phoenix, AZ</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Продукты готовы, можно купить сразу\n"
+                    "⏰ 05:00 – 22:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/29 ">Меню</a> (в комментариях)\n'
+                    "📞 +16028201597\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "ARIZONA-HALAL-FOOD-1",
+                "lat": 33.53869100,
+                "lng": -112.18625700,
+                "text": (
+                    "🍽️ <b>ARIZONA HALAL FOOD</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=33.53869100 ,-112.18625700">Phoenix, AZ</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 4–5 ч до доставки\n"
+                    "⏰ 08:00 – 20:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/30 ">Меню</a> (в комментариях)\n'
+                    "📞 +14807891711\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "TOSHKENT-MILLIY-TAOMLARI",
+                "lat": 33.49340800,
+                "lng": -112.33416100,
+                "text": (
+                    "🍽️ <b>TOSHKENT MILLIY TAOMLARI</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=33.49340800 ,-112.33416100">Phoenix, AZ</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Продукты готовы, можно купить сразу\n"
+                    "⏰ 07:00 – 21:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/31 ">Меню</a> (в комментариях)\n'
+                    "📞 +16232056021  +16023489938\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "ALIS-KITCHEN",
+                "lat": 33.46092400,
+                "lng": -112.25515400,
+                "text": (
+                    "🍽️ <b>ALI'S KITCHEN</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=33.46092400 ,-112.25515400">Phoenix, AZ</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Продукты готовы, можно купить сразу\n"
+                    "⏰ 09:00 – 00:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/32 ">Меню</a> (в комментариях)\n'
+                    "📞 +16026997010\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "UZBEK-HALAL-FOODS-MEMPHIS",
+                "lat": 35.04594700,
+                "lng": -90.02337700,
+                "text": (
+                    "🍽️ <b>UZBEK HALAL FOODS</b>\n"
+                    '📍 <a href="https://maps.app.goo.gl/DxTwbfJaypEZvf647 ">Memphis, TN</a> (Arkansas border)\n'
+                    "🏠 Фудтрак\n"
+                    "🧾 Продукты готовы, можно купить сразу\n"
+                    "⏰ 09:00 – 23:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/33 ">Меню</a> (в комментариях)\n'
+                    "📞 +15126693163\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "MADI-FOOD",
+                "lat": 28.03012900,
+                "lng": -82.45883800,
+                "text": (
+                    "🍽️ <b>MADI FOOD (Uygʻurcha taomlar)</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=28.03012900 ,-82.45883800">Tampa, FL</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 3–4 ч до доставки\n"
+                    "⏰ 10:00 – 22:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/34 ">Меню</a> (в комментариях)\n'
+                    "📞 +17178058368\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "CHAYHANA-ORLANDO",
+                "lat": 28.66596900,
+                "lng": -81.41681300,
+                "text": (
+                    "🍽️ <b>CHAYHANA ORLANDO</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=28.66596900 ,-81.41681300">Orlando, FL</a>\n'
+                    "🏠 Ресторан\n"
+                    "🧾 Продукты готовы, можно купить сразу\n"
+                    "⏰ 11:00 – 22:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/35 ">Меню</a> (в комментариях)\n'
+                    "📞 +13214220143\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "CARAVAN-RESTAURANT-CHICAGO",
+                "lat": 41.87811400,
+                "lng": -87.62979800,
+                "text": (
+                    "🍽️ <b>CARAVAN RESTAURANT</b>\n"
+                    '📍 <a href="https://maps.app.goo.gl/gj72DoxeAVhTFgsy5 ">Chicago, IL</a>\n'
+                    "🏠 Ресторан\n"
+                    "🧾 Продукты готовы, можно купить сразу\n"
+                    "⏰ 10:00 – 22:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/36 ">Меню</a> (в комментариях)\n'
+                    "📞 +17733673258\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "TAKU-FOOD",
+                "lat": 41.98429200,
+                "lng": -87.69751100,
+                "text": (
+                    "🍽️ <b>TAKU FOOD</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=41.98429200 ,-87.69751100">Chicago, IL</a>\n'
+                    "🏠 Ресторан\n"
+                    "🧾 Продукты готовы, можно купить сразу\n"
+                    "⏰ 08:00 – 23:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/37 ">Меню</a> (в комментариях)\n'
+                    "📞 +12247600211  +17736812626\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "KAZAN-KEBAB",
+                "lat": 41.77922600,
+                "lng": -88.34295400,
+                "text": (
+                    "🍽️ <b>KAZAN KEBAB</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=41.77922600 ,-88.34295400">Chicago, IL</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Продукты готовы, можно купить сразу\n"
+                    "⏰ 24/7\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/38 ">Меню</a> (в комментариях)\n'
+                    "📞 +15517869980\n"
+                    "📱 Telegram: @Ali071188, @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "MAKSAT-FOOD-TRUCK",
+                "lat": 45.52630600,
+                "lng": -122.63703900,
+                "text": (
+                    "🍽️ <b>MAKSAT FOOD TRUCK</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=45.52630600 ,-122.63703900">Portland, OR</a>\n'
+                    "🚛 Фудтрак\n"
+                    "🧾 Продукты готовы, можно купить сразу\n"
+                    "⏰ 10:00 – 23:00\n"
+                    "🚘 Доставка бесплатная\n"
+                    '📋 <a href="https://t.me/myhalalmenu/39 ">Меню</a> (в комментариях)\n'
+                    "📞 +13602108483\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "NAVAT-PDX",
+                "lat": 45.54936400,
+                "lng": -122.66185700,
+                "text": (
+                    "🍽️ <b>NAVAT PDX</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=45.54936400 ,-122.66185700">Portland, OR</a>\n'
+                    "🚛 Фудтрак\n"
+                    "🧾 Продукты готовы, можно купить сразу\n"
+                    "⏰ 11:00 – 22:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/40 ">Меню</a> (в комментариях)\n'
+                    "📞 +14254282011  +17253774764\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "OSH-RESTAURANT-AND-GRILL",
+                "lat": 36.11125400,
+                "lng": -86.74126300,
+                "text": (
+                    "🍽️ <b>OSH RESTAURANT AND GRILL</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=36.11125400 ,-86.74126300">Nashville, TN</a>\n'
+                    "🏠 Ресторан\n"
+                    "🧾 Заказы до 21:00\n"
+                    "⏰ Вт–Вс: 11:00 – 21:00 | Пн: выходной\n"
+                    "🚘 Доставка: 10:00 – 02:00\n"
+                    '📋 <a href="https://t.me/myhalalmenu/42 ">Меню</a> (в комментариях)\n'
+                    "📞 +16157102288  +16159684444  +16157129985\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "BROOKLYN-PIZZA",
+                "lat": 36.11934500,
+                "lng": -86.74898100,
+                "text": (
+                    "🍽️ <b>BROOKLYN PIZZA</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=36.11934500 ,-86.74898100">Nashville, TN</a>\n'
+                    "🏠 Кафе\n"
+                    "🧾 Продукты готовы, можно купить сразу\n"
+                    "⏰ 10:00 – 22:00\n"
+                    "🚘 Доставка: 24/7 — $1 за милю\n"
+                    '📋 <a href="https://t.me/myhalalmenu/43 ">Меню</a> (в комментариях)\n'
+                    "📞 +16159552222  +16159257070\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "KAMOLA-OSHXONASI",
+                "lat": 35.96075200,
+                "lng": -83.92075000,
+                "text": (
+                    "🍽️ <b>KAMOLA OSHXONASI</b>\n"
+                    '📍 <a href="https://maps.app.goo.gl/Z83tPnCtbYSxLuCL9 ">Knoxville, TN</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 4–5 ч до доставки\n"
+                    "⏰ 09:00 – 22:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/44 ">Меню</a> (в комментариях)\n'
+                    "📞 +18654100845\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "UZBEGIM-RESTAURANT",
+                "lat": 36.16266400,
+                "lng": -86.78160200,
+                "text": (
+                    "🍽️ <b>UZBEGIM RESTAURANT</b>\n"
+                    '📍 <a href="https://maps.app.goo.gl/9U3e96s2EmA6sUMG6 ">Nashville, TN</a>\n'
+                    "🏠 Кафе\n"
+                    "🧾 Продукты готовы, можно купить сразу\n"
+                    "⏰ Время уточняется\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/45 ">Меню</a> (в комментариях)\n'
+                    "📞 +13476138691\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "BARAKAT-HALAL-FOOD",
+                "lat": 29.78456000,
+                "lng": -95.80117000,
+                "text": (
+                    "🍽️ <b>BARAKAT HALAL FOOD</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=29.78456000 ,-95.80117000">Houston, TX</a>\n'
+                    "🏠 Фудтрак\n"
+                    "🧾 Продукты готовы, можно купить сразу\n"
+                    "⏰ 24/7\n"
+                    "🚘 Доставка 24/7\n"
+                    '📋 <a href="https://t.me/myhalalmenu/46 ">Меню</a> (в комментариях)\n'
+                    "📞 +13463772939\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "DIYAR-HOUSTON-FOOD",
+                "lat": 29.77985100,
+                "lng": -95.88196500,
+                "text": (
+                    "🍽️ <b>DIYAR HOUSTON FOOD</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=29.77985100 ,-95.88196500">Houston, TX</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 4–5 ч до доставки\n"
+                    "⏰ 09:30 – 23:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/47 ">Меню</a> (в комментариях)\n'
+                    "📞 +13462740363\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "CARAVAN-HOUSE",
+                "lat": 41.04526200,
+                "lng": -81.58033400,
+                "text": (
+                    "🍽️ <b>CARAVAN HOUSE</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=41.04526200 ,-81.58033400">Akron, OH</a>\n'
+                    "🏠 Ресторан рядом с AMAZON\n"
+                    "🧾 Продукты готовы, можно купить сразу\n"
+                    "⏰ 09:00 – 23:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/48 ">Меню</a> (в комментариях)\n'
+                    "📞 +14405755555  +12344020202\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "CHAYHANA-PERRYSBURG",
+                "lat": 41.57081200,
+                "lng": -83.62053800,
+                "text": (
+                    "🍽️ <b>CHAYHANA</b>\n"
+                    "📍 Perrysburg / Toledo, OH\n"
+                    "🏠 Ресторан\n"
+                    "🧾 Заказы за 4–5 ч до доставки\n"
+                    "⏰ 08:00 – 00:00\n"
+                    "🚘 Доставка через Uber / DoorDash\n"
+                    '📋 <a href="https://t.me/myhalalmenu/49 ">Меню</a> (в комментариях)\n'
+                    "📞 +14196034800\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "TASHKENTFOOD-HALAL",
+                "lat": 39.44555600,
+                "lng": -84.20035400,
+                "text": (
+                    "🍽️ <b>Tashkentfood Xalal</b>\n"
+                    '📍 <a href="https://maps.app.goo.gl/8aKnspJrH5vPfMq79 ">Lebanon, OH</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 2 ч до получения\n"
+                    "⏰ 08:00 – 21:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/50 ">Меню</a> (в комментариях)\n'
+                    "📞 +15133321404\n"
+                    "📱 Telegram: @MYHALAL_FOOD, @Tashkent halal food Ohio"
+                )
+            },
+            {
+                "name": "NUR-KITCHEN",
+                "lat": 30.43137000,
+                "lng": -97.75393400,
+                "text": (
+                    "🍽️ <b>NUR KITCHEN</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=30.43137000 ,-97.75393400">Austin, TX</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 3–4 ч до доставки\n"
+                    "⏰ 09:00 – 21:00\n"
+                    "🚘 Доставка: бесплатно по Austin, Pflugerville, San Marcos\n"
+                    '📋 <a href="https://t.me/myhalalmenu/53 ">Меню</a> (в комментариях)\n'
+                    "📞 +17377078330\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "MAZALI-CHARLOTTE-OSHXONASI",
+                "lat": 35.23408200,
+                "lng": -80.87282000,
+                "text": (
+                    "🍽️ <b>MAZALI CHARLOTTE OSHXONASI</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=35.23408200 ,-80.87282000">Charlotte, NC</a>\n'
+                    "🏠 Ресторан\n"
+                    "🧾 Заказы за 3–4 ч до доставки\n"
+                    "⏰ Пн–Пт: 11:00 – 20:00 | Сб–Вс: выходной\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/54 ">Меню</a> (в комментариях)\n'
+                    "📞 +13477856222  +13476666930\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "NND-FOOD",
+                "lat": 35.25497600,
+                "lng": -80.97975000,
+                "text": (
+                    "🍽️ <b>N.N.D FOOD</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=35.25497600 ,-80.97975000">Charlotte, NC</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 2–3 ч до доставки\n"
+                    "⏰ 24/7\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/55 ">Меню</a> (в комментариях)\n'
+                    "📞 +17045764025  +17046191145  +19802393354\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "AFSONA",
+                "lat": 40.63575300,
+                "lng": -73.97448900,
+                "text": (
+                    "🍽️ <b>Afsona</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=40.63575300 ,-73.97448900">Brooklyn, NY</a>\n'
+                    "🏠 Ресторан\n"
+                    "🧾 Заказы заранее, еду можно забирать\n"
+                    "⏰ 06:00 – 23:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/57 ">Меню</a> (в комментариях)\n'
+                    "📞 +17186333006  +19296224444  +19294002252\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "UZBEKISTAN-TAOMLARI",
+                "lat": 40.09541213,
+                "lng": -75.04420414,
+                "text": (
+                    "🍽️ <b>UZBEKISTAN TAOMLARI</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=40.09541213 ,-75.04420414">Bustleton, PA</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы заранее\n"
+                    "⏰ Время уточняется\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/58 ">Меню</a> (в комментариях)\n'
+                    "📞 +12672442371\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "BARAKAT-KAZAKH-CUISINE",
+                "lat": 34.11959200,
+                "lng": -83.76195000,
+                "text": (
+                    "🍽️ <b>Barakat Казахская Cuisine</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=34.11959200 ,-83.76195000">Braselton, GA</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 2–3 ч до доставки\n"
+                    "⏰ 09:00 – 18:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/59 ">Меню</a> (в комментариях)\n'
+                    "📞 +14706689307\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "VIRGINIA-DC-UZBEK-HALAL",
+                "lat": 38.79516300,
+                "lng": -77.52366300,
+                "text": (
+                    "🍽️ <b>Virginia & DC Uzbek Halal Food</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=38.79516300 ,-77.52366300">Virginia / DC Area</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 3–4 ч до доставки\n"
+                    "⏰ 07:00 – 00:00\n"
+                    "🚘 Доставка: I-66, I-95, I-81\n"
+                    '📋 <a href="https://t.me/myhalalmenu/60 ">Меню</a> (в комментариях)\n'
+                    "📞 +15716327034\n"
+                    "📱 Telegram: @MYHALAL_FOOD, @virginia_halal_food"
+                )
+            },
+            {
+                "name": "ISLOM-BALTIMORE-FOOD",
+                "lat": 39.36578700,
+                "lng": -76.75882500,
+                "text": (
+                    "🍽️ <b>ISLOM BALTIMORE FOOD</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=39.36578700 ,-76.75882500">Baltimore, MD</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 3–4 ч до доставки\n"
+                    "⏰ 07:00 – 18:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/61 ">Меню</a> (в комментариях)\n'
+                    "📞 +15677070708\n"
+                    "📱 Telegram: @MYHALAL_FOOD, @Madinakhonmd"
+                )
+            },
+            {
+                "name": "IRODA-OSHXONASI",
+                "lat": 30.41205600,
+                "lng": -88.82872200,
+                "text": (
+                    "🍽️ <b>IRODA OSHXONASI</b>\n"
+                    '📍 <a href="https://maps.app.goo.gl/wCDtog9z5zeqyAeY8 ">Ocean Springs, MS</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за день до доставки\n"
+                    "⏰ 10:00 – 22:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/62 ">Меню</a> (в комментариях)\n'
+                    "📞 +12282432635\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "TASHKENT-CUISINE",
+                "lat": 40.44291300,
+                "lng": -80.08243800,
+                "text": (
+                    "🍽️ <b>TASHKENT CUISINE</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=40.44291300 ,-80.08243800">Pittsburgh, PA</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 2–3 ч до доставки\n"
+                    "⏰ 10:00 – 22:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/63 ">Меню</a> (в комментариях)\n'
+                    "📞 +14125190156\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "ARIZONA-HALAL-FOOD-2",
+                "lat": 33.46083600,
+                "lng": -112.20724400,
+                "text": (
+                    "🍽️ <b>ARIZONA HALAL FOOD</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=33.46083600 ,-112.20724400">Phoenix, AZ</a>\n'
+                    "🏠 Кухня на вынос из дома\n"
+                    "🧾 Заказы за 2–3 ч до доставки\n"
+                    "⏰ 08:00 – 00:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/64 ">Меню</a> (в комментариях)\n'
+                    "📞 +14806343188\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "SILK-ROAD-UZBEK-KAZAKH",
+                "lat": 34.05223500,
+                "lng": -117.60254700,
+                "text": (
+                    "🍽️ <b>SILK ROAD UZBEK - KAZAKH kitchen</b>\n"
+                    '📍 <a href="https://maps.app.goo.gl/LbdR5qiVbxSYt4F49 ">Ontario, CA (TA Truck Stop)</a>\n'
+                    "🚛 Фудтрак\n"
+                    "🧾 Блюда готовы к выдаче\n"
+                    "⏰ 08:00 – 23:00\n"
+                    "🚘 Доставка до 50 миль\n"
+                    '📋 <a href="https://t.me/myhalalmenu/65 ">Меню</a> (в комментариях)\n'
+                    "📞 +18722221736\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "HALAL-FOOD-IN-NASHVILLE",
+                "lat": 36.04294500,
+                "lng": -86.74166700,
+                "text": (
+                    "🍽️ <b>HALAL FOOD IN NASHVILLE</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=36.04294500 ,-86.74166700">Nashville, TN</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 30 мин до доставки\n"
+                    "⏰ 07:00 – 23:00\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/66 ">Меню</a> (в комментариях)\n'
+                    "📞 +16156913309\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "HALOL-FOOD-MUHAMMADAMIN-ASAKA",
+                "lat": 36.18959100,
+                "lng": -86.47507800,
+                "text": (
+                    "🍽️ <b>HALOL FOOD MUHAMMADAMIN ASAKA</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=36.18959100 ,-86.47507800">Nashville, TN</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 2 ч до доставки\n"
+                    "⏰ 24/7\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/67 ">Меню</a> (в комментариях)\n'
+                    "📞 +12159296717  +18352059595\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "UZBEK-FOOD-MINNESOTA",
+                "lat": 44.97775300,
+                "lng": -93.26501100,
+                "text": (
+                    "🍽️ <b>UZBEK FOOD MINNESOTA</b>\n"
+                    "📍 Minneapolis, MN\n"
+                    "🏠 Кухня на вынос из дома\n"
+                    "🧾 Заказы за 4–5 ч до доставки\n"
+                    "⏰ 08:00 – 22:00\n"
+                    "🚘 Доставка есть\n"
+                    "📋 Меню: смотреть в комментариях\n"
+                    "📞 +16513525551\n"
+                    "📱 Telegram: @Manzura_Burkhan, @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "OASIS-DLYA-TRAKEROV",
+                "lat": 32.77666500,
+                "lng": -96.79698900,
+                "text": (
+                    "🍽️ <b>ОАЗИС ДЛЯ ТРАКЕРОВ</b>\n"
+                    "📍 Dallas, TX\n"
+                    "🏠 Доставка свежей домашней еды к вашей парковке (до 30 миль)\n"
+                    "✨ Условия доставки:\n"
+                    "— Минимум $30\n"
+                    "— Доставка $15\n"
+                    "— Бесплатно от $250\n"
+                    "🧾 100% халяль: борщи, плов, пельмени, салаты, выпечка\n"
+                    "🚚 Заказ за 3–4 ч до получения\n"
+                    "💰 Скидки постоянным\n"
+                    '🌐 <a href="https://t.me/oasiseda ">Меню</a>\n'
+                    "📞 +13478881927\n"
+                    "📱 Telegram: https://t.me/oasiseda , @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "GOLDEN-BY-NUSAYBA",
+                "lat": 39.92883400,
+                "lng": -74.23729300,
+                "text": (
+                    "🍽️ <b>GOLDEN BY NUSAYBA</b>\n"
+                    '📍 <a href="https://maps.app.goo.gl/N58gFq6UrewBrBWm7 ">New Jersey, Lakewood</a>\n'
+                    "🏠 Домашняя кухня\n"
+                    "🧾 Готовлю по желанию клиента\n"
+                    "⏰ 08:00 – 00:00\n"
+                    "🚘 Доставка есть\n"
+                    "📋 Меню: смотреть в Instagram\n"
+                    "📞 +13478137000\n"
+                    "📱 Instagram: @golden_by_nusayba_nj"
+                )
+            },
+            {
+                "name": "UZBEKISTAN-RESTAURANT-CINCINNATI",
+                "lat": 39.10311800,
+                "lng": -84.51202000,
+                "text": (
+                    "🍽️ <b>UZBEKISTAN RESTAURANT</b>\n"
+                    '📍 <a href="https://maps.app.goo.gl/28d42BXtNPUZ9D7GA ">Cincinnati Ohio</a>\n'
+                    "🏠 Домашняя кухня\n"
+                    "🧾 Заказы за 3–4 ч до доставки\n"
+                    "⏰ 10:00 – 22:00\n"
+                    "🚘 Доставка 24/7\n"
+                    '📋 <a href="https://t.me/myhalalmenu/72 ">Меню</a>\n'
+                    "📞 +12674230301\n"
+                    "📱 Telegram: @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "BISMILLAH-HALAL-FOOD",
+                "lat": 41.87811400,
+                "lng": -87.62979800,
+                "text": (
+                    "🍽️ <b>Bismillah HALAL FOOD</b>\n"
+                    '📍 <a href="https://maps.app.goo.gl/az7BJLtakcbejw4K6 ">Chicago IL</a>\n'
+                    "🏠 Домашняя кухня\n"
+                    "🧾 Заказы за 3–4 ч до доставки\n"
+                    "⏰ 24/7\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/73 ">Меню</a>\n'
+                    "📞 +14075957655\n"
+                )
+            },
+            {
+                "name": "KHOZYAYUSHKA-UZBEK-KITCHEN",
+                "lat": 36.07954100,
+                "lng": -86.69676900,
+                "text": (
+                    "🍽️ <b>Хозяюшка Uzbek kitchen</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=36.07954100 ,-86.69676900">Nashville, TN</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 2–3 ч до доставки\n"
+                    "⏰ 24/7\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/78 ">Меню</a> (в комментариях)\n'
+                    "📞 +16159799172\n"
+                    "📱 Telegram: @Xozayush, @MYHALAL_FOOD"
+                )
+            },
+            {                   
+                "name": "ATLAS-KITCHEN",
+                "lat": 38.85842400,
+                "lng": -94.81290200,
+                "text": (
+                    "🍽️ <b>ATLAS KITCHEN</b>\n"
+                    '📍 <a href="https://www.google.com/maps?q=38.85842400 ,-94.81290200">Kansas City, KS/MO</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 4–5 ч до доставки\n"
+                    "⏰ 15:00 – 22:00\n"
+                    "🚘 Доставка: Договорная\n"
+                    '📋 <a href="https://t.me/myhalalmenu/81 ">Меню</a> (в комментариях)\n'
+                    "📞 +19134869109  +19899544770\n"
+                    "📱 Telegram: @Sabru_jamil1, @Bek_KC"
+                )
+            },    
+            {
+                "name": "RAIANA-HALAL-FOOD",
+                "lat": 38.58157200,
+                "lng": -121.49440000,
+                "text": (
+                    "🍽️ <b>RAIANA halal food</b>\n"
+                    '📍 <a href="https://maps.app.goo.gl/bgCVHfHMcR3hfdzx5 ">Sacramento, CA</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 2–3 ч до доставки\n"
+                    "⏰ 24/7\n"
+                    "🚘 Доставка есть\n"
+                    '📋 <a href="https://t.me/myhalalmenu/79 ">Меню</a> (в комментариях)\n'
+                    "📞 +17732567187  +1773256893\n"
+                    "📱 Telegram: @Raiana_halal_food, @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "HALAL-JASMIN-KITCHEN",
+                "lat": 39.09972700,
+                "lng": -94.57856700,
+                "text": (
+                    "🍽️ <b>Halal Jasmin Kitchen</b>\n"
+                    '📍 <a href="https://maps.app.goo.gl/MTc7JWSzKxafXtH27 ">Kansas</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 1.5–2 ч до доставки\n"
+                    "⏰ 09:00 – 00:00\n"
+                    "🚘 Бесплатная доставка по Kansas City\n"
+                    '📋 <a href="https://t.me/myhalalmenu/80 ">Меню</a> (в комментариях)\n'
+                    "📞 +18162991870\n"
+                    "📱 Telegram: @Rozazhasmin, @MYHALAL_FOOD"
+                )
+            },
+            {
+                "name": "YASINA-FOOD",
+                "lat": 28.53833600,
+                "lng": -81.37923400,
+                "text": (
+                    "🍽️ <b>Yasina Food</b>\n"
+                    '📍 <a href="https://maps.app.goo.gl/eVZw1iT74fqb9LSMA ">Orlando FL</a>\n'
+                    "🏠 Домашняя кухня на вынос\n"
+                    "🧾 Заказы за 3–4 ч до доставки\n"
+                    "⏰ 09:00 – 22:00\n"
+                    "🚘 Доставка по тракстопам\n"
+                    '📋 <a href="https://t.me/myhalalmenu/82 ">Меню</a> (в комментариях)\n'
+                    "📞 +16892389299\n"
+                    "📱 Telegram: @yasishfood, @MYHALAL_FOOD"
+                )
+            }
+        ]
+
+
+
+async def add_place_to_db(name: str, lat: float, lng: float, text_user: str, text_channel: str) -> int:
+    """Yangi joy qo'shish va uning ID sini qaytarish"""
+    global db_pool
+    
+    if db_pool is None:
+        await init_db()
+    
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO places (name, lat, lng, text_user, text_channel) 
+               VALUES ($1, $2, $3, $4, $5) 
+               RETURNING id""",
+            name, lat, lng, text_user, text_channel
+        )
+        return row['id']
+
 
 # ---------------- global o'zgaruvchilar ---------------- 
 # ---------------- bot va dispatcher ----------------
 bot = Bot(token=BOT_TOKEN,
           default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
+geolocator = Nominatim(user_agent="halal_bot")
+
+import spacy
+
+
 
 # Inglizcha model
 try:
@@ -410,15 +1472,15 @@ def haversine(lat1, lon1, lat2, lon2):
 
 
 import re
-import requests
-from urllib.parse import unquote
+import asyncio
+from geopy.geocoders import Nominatim
 
 geolocator = Nominatim(user_agent="halal_bot")
 
 async def smart_usa_coords(text: str) -> tuple[float, float] | tuple[None, None]:
     """
     Istalgan amerika shahri/shhtat/kodini «shahar, shtat, USA» shakliga
-    aylantirib, aniq koordinatani topadi. 🇺🇸 dan boshqa davlatlarni olmaydi.
+    aylantirib, aniq koordinat qaytaradi. 🇺🇸 dan boshqa davlatlarni olmaydi.
     """
     if not text:
         return None, None
@@ -613,11 +1675,8 @@ def admin_main_menu_ikb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="➕ Yangi restoran qo‘shish", callback_data="start_add_rest")],
             [InlineKeyboardButton(text="📋 Barcha restoranlar", callback_data="show_all_restaurants")],
-            [InlineKeyboardButton(text="➕ So‘z qora ro‘yxati", callback_data="blacklist_word"),
-             InlineKeyboardButton(text="📋 Qora ro‘yxat", callback_data="list_blacklist")],
-            [InlineKeyboardButton(text="📊 Baza holati", callback_data="dbstatus"),
-             InlineKeyboardButton(text="📦 Backup (CSV)", callback_data="backup")],
-            [InlineKeyboardButton(text="🔄 Restore (tiklash)", callback_data="restore")]
+            [InlineKeyboardButton(text="➕ So‘z qora ro‘yxati", callback_data="blacklist_word")],
+            [InlineKeyboardButton(text="📋 Qora ro‘yxat", callback_data="list_blacklist")]
         ]
     )
 
@@ -650,18 +1709,18 @@ async def choose_blacklist_word(message: types.Message, state: FSMContext):
         [InlineKeyboardButton(text="🗑️ O‘chirish", callback_data="confirm_del_blacklist")],
         [InlineKeyboardButton(text="❌ Bekor", callback_data="cancel_del_blacklist")]
     ])
-    await message.answer(f"«<<code>{word}</code>» ni o‘chirishni xohlaysizmi?", reply_markup=kb)
+    await message.answer(f"«<code>{word}</code>» ni o‘chirishni xohlaysizmi?", reply_markup=kb)
     await state.set_state(BlacklistManage.waiting_confirm)
 
 
 
 
 @dp.callback_query(F.data == "confirm_del_blacklist", BlacklistManage.waiting_confirm)
-async def confirm_del_blacklist(call: types.CallbackQuery, state: FSMContext):
+async def delete_blacklist_word(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     word = data["word"]
-    await remove_blacklist_word(word)
-    await call.message.edit_text(f"✅ «<<code>{word}</code>» qora ro‘yxatdan o‘chirildi.")
+    await delete_blacklist_word(word)
+    await call.message.edit_text(f"✅ «<code>{word}</code>» qora ro‘yxatdan o‘chirildi.")
     await state.clear()
 
 
@@ -766,6 +1825,11 @@ async def skip_extra_handler(call: types.CallbackQuery, state: FSMContext):
     await state.update_data(extra_info="")          # bo‘sh qoldirdik
     await show_confirmation(call, state)            # to‘liq ko‘rsatishga o‘tamiz   
 
+# @dp.callback_query(F.data == "skip_extra", AddRest.extra_info)
+# async def skip_extra(call: types.CallbackQuery, state: FSMContext):
+#     await state.update_data(extra_info="")
+#     await call.message.delete()
+#     await show_confirmation(call, state)
 
 @dp.message(AddRest.extra_info, F.text)
 async def save_extra_info(message: types.Message, state: FSMContext):
@@ -1052,8 +2116,8 @@ async def save_edit_name(message: types.Message, state: FSMContext):
                 continue
             old_text = PLACES[index][key]
             new_text = re.sub(
-                r'(📍 <a\s+href\s*=\s*["\'][^"\']*["\']\s*>)[^<<]*?(</a>)',
-                rf'\g<<1>{new_value}\g<<2>',
+                r'(📍 <a\s+href\s*=\s*["\'][^"\']*["\']\s*>)[^<]*?(</a>)',
+                rf'\g<1>{new_value}\g<2>',
                 old_text,
                 flags=re.IGNORECASE
             )
@@ -1071,8 +2135,8 @@ async def save_edit_name(message: types.Message, state: FSMContext):
         if loc_idx < len(loc_lines):
             old_line = lines[loc_lines[loc_idx]]
             new_line = re.sub(
-                r'(📍\s*<<a[^>]*>)[^<<]*?(</a>)',
-                rf'\g<<1>{new_value}\g<<2>',
+                r'(📍\s*<a[^>]*>)[^<]*?(</a>)',
+                rf'\g<1>{new_value}\g<2>',
                 old_line,
                 flags=re.I
             )
@@ -1102,7 +2166,7 @@ async def save_edit_name(message: types.Message, state: FSMContext):
                 continue
             PLACES[index][key] = re.sub(
                 r'(📞\s*)[+\d\s()-]+',
-                rf'\g<<1>{new_value}\n',
+                rf'\g<1>{new_value}\n',
                 PLACES[index][key],
                 flags=re.IGNORECASE
             )
@@ -1117,7 +2181,7 @@ async def save_edit_name(message: types.Message, state: FSMContext):
                 continue
             PLACES[index][key] = re.sub(
                 r'(📱 Telegram:\s*)@[\w\d_]+',
-                rf'\g<<1>{new_value}',
+                rf'\g<1>{new_value}',
                 PLACES[index][key],
                 flags=re.IGNORECASE
             )
@@ -1132,7 +2196,7 @@ async def save_edit_name(message: types.Message, state: FSMContext):
                 continue
             PLACES[index][key] = re.sub(
                 r'(<a\s+href\s*=\s*["\']https://t\.me/myhalalmenu/)[^"\']+(["\']\s*>Меню</a>)',
-                rf'\g<<1>{new_value}\g<<2>',
+                rf'\g<1>{new_value}\g<2>',
                 PLACES[index][key],
                 flags=re.IGNORECASE
             )
@@ -1293,8 +2357,8 @@ async def save_edit_location_link(message: types.Message, state: FSMContext):
         old = PLACES[idx][key]
         # Havolani almashtirish (barcha xavfsizlik belgilari bilan)
         new = re.sub(
-            r'(📍\s*<<a\s+href\s*=\s*["\'])[^"\']*(["\'][^>]*>[^<<]*</a>)',
-            rf'\g<<1>{new_link}\g<<2>',
+            r'(📍\s*<a\s+href\s*=\s*["\'])[^"\']*(["\'][^>]*>[^<]*</a>)',
+            rf'\g<1>{new_link}\g<2>',
             old,
             flags=re.I
         )
@@ -1324,8 +2388,8 @@ async def save_edit_location_name(message: types.Message, state: FSMContext):
         old_text = PLACES[idx][key]
         # 📍 <a href="...">ESKI_NOM</a> → 📍 <a href="...">YANGI_NOM</a>
         new_text = re.sub(
-            r'(📍 <a\s+href\s*=\s*["\'][^"\']*["\']\s*>)[^<<]*?(</a>)',
-            rf'\g<<1>{new_name}\g<<2>',
+            r'(📍 <a\s+href\s*=\s*["\'][^"\']*["\']\s*>)[^<]*?(</a>)',
+            rf'\g<1>{new_name}\g<2>',
             old_text,
             flags=re.IGNORECASE
         )
@@ -1464,7 +2528,7 @@ async def save_edit_menu_num(message: types.Message, state: FSMContext):
         # 🌐 yoki 📋 bilan boshlangan havolani topamiz
         PLACES[idx][key] = re.sub(
             r'(<a\s+href\s*=\s*["\']https://t\.me/myhalalmenu/)[^"\']+(["\']\s*>Меню</a>)',
-            rf'\g<<1>{new_num}\g<<2>',
+            rf'\g<1>{new_num}\g<2>',
             PLACES[idx][key],
             flags=re.IGNORECASE
         )
@@ -1911,206 +2975,31 @@ async def by_text(message: types.Message):
         )
 
 
-# ---------------- admin backup / restore ----------------
-@dp.message(Command("dbstatus"))
-async def cmd_dbstatus(message: types.Message):
-    if message.from_user.id not in ADMIN_ID:
-        return
-    count = len(PLACES)
-    total = len(initial_places)
-    status = "✅ To'liq" if count >= total else f"⚠️ {total - count} ta yetishmayapti"
-    await message.answer(
-        f"📊 <b>Baza holati</b>\n"
-        f"Hozir: {count} ta\n"
-        f"Kutilgan: {total} ta\n"
-        f"Holat: {status}"
-    )
-
-@dp.message(Command("backup"))
-async def cmd_backup(message: types.Message):
-    if message.from_user.id not in ADMIN_ID:
-        return
-
-    output = io.StringIO()
-    output.write("id|name|lat|lng|text_user|text_channel\n")
-    for p in PLACES:
-        output.write(
-            f"{p.get('id', '')}|{p['name']}|{p['lat']}|{p['lng']}|"
-            f"{p.get('text_user', '')}|{p.get('text_channel', '')}\n"
-        )
-
-    file = BufferedInputFile(
-        output.getvalue().encode('utf-8'),
-        filename=f"backup_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
-    )
-    await message.answer_document(
-        file,
-        caption=f"📦 <b>Backup</b>\nBazada {len(PLACES)} ta restoran"
-    )
-
-@dp.message(Command("restore"))
-async def cmd_restore(message: types.Message):
-    if message.from_user.id not in ADMIN_ID:
-        return
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Ha, to'liq tiklash", callback_data="force_restore_confirm"),
-            InlineKeyboardButton(text="❌ Bekor", callback_data="cancel_restore")
-        ]
-    ])
-    await message.answer(
-        f"⚠️ <b>Diqqat!</b>\n"
-        f"Bazada {len(PLACES)} ta restoran bor.\n"
-        f"Barchasini o'chirib, kod ichidagi {len(initial_places)} ta restorandan "
-        f"qayta tiklashni xohlaysizmi?\n\n"
-        f"<i>Avval /backup buyrug'ini yuborib zaxira nusxa oling!</i>",
-        reply_markup=kb
-    )
-
-@dp.callback_query(F.data == "force_restore_confirm")
-async def force_restore_callback(call: types.CallbackQuery):
-    global PLACES
-
-    async with db_pool.acquire() as conn:
-        await conn.execute("TRUNCATE TABLE places RESTART IDENTITY CASCADE")
-        for p in initial_places:
-            await conn.execute(
-                """INSERT INTO places (name, lat, lng, text_user, text_channel)
-                   VALUES ($1, $2, $3, $4, $5)""",
-                p['name'], p['lat'], p['lng'],
-                p.get('text_user', p['text']),
-                p.get('text_channel', p['text'])
-            )
-
-    PLACES = await load_places_from_db()
-    for i, place in enumerate(PLACES):
-        if 'id' not in place:
-            place['id'] = i + 1
-
-    await call.message.edit_text(
-        f"✅ <b>To'liq tiklash tugadi!</b>\n"
-        f"Bazada {len(PLACES)} ta restoran bor."
-    )
-
-@dp.callback_query(F.data == "cancel_restore")
-async def cancel_restore_callback(call: types.CallbackQuery):
-    await call.message.edit_text("❌ Tiklash bekor qilindi.")
-
-
-# ---------------- NEW: Tugma handlerlari ----------------
-@dp.callback_query(F.data == "dbstatus")
-async def callback_dbstatus(call: types.CallbackQuery):
-    if call.from_user.id not in ADMIN_ID:
-        await call.answer("❌ Ruxsat yo'q!", show_alert=True)
-        return
-    await call.answer()
-    count = len(PLACES)
-    total = len(initial_places)
-    status = "✅ To'liq" if count >= total else f"⚠️ {total - count} ta yetishmayapti"
-    await call.message.answer(
-        f"📊 <b>Baza holati</b>\n"
-        f"Hozir: {count} ta\n"
-        f"Kutilgan: {total} ta\n"
-        f"Holat: {status}",
-        reply_markup=admin_main_menu_ikb()
-    )
-
-@dp.callback_query(F.data == "backup")
-async def callback_backup(call: types.CallbackQuery):
-    if call.from_user.id not in ADMIN_ID:
-        await call.answer("❌ Ruxsat yo'q!", show_alert=True)
-        return
-    await call.answer()
-
-    output = io.StringIO()
-    output.write("id|name|lat|lng|text_user|text_channel\n")
-    for p in PLACES:
-        output.write(
-            f"{p.get('id', '')}|{p['name']}|{p['lat']}|{p['lng']}|"
-            f"{p.get('text_user', '')}|{p.get('text_channel', '')}\n"
-        )
-
-    file = BufferedInputFile(
-        output.getvalue().encode('utf-8'),
-        filename=f"backup_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
-    )
-    await call.message.answer_document(
-        file,
-        caption=f"📦 <b>Backup</b>\nBazada {len(PLACES)} ta restoran"
-    )
-
-@dp.callback_query(F.data == "restore")
-async def callback_restore(call: types.CallbackQuery):
-    if call.from_user.id not in ADMIN_ID:
-        await call.answer("❌ Ruxsat yo'q!", show_alert=True)
-        return
-    await call.answer()
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Ha, to'liq tiklash", callback_data="force_restore_confirm"),
-            InlineKeyboardButton(text="❌ Bekor", callback_data="cancel_restore")
-        ]
-    ])
-    await call.message.answer(
-        f"⚠️ <b>Diqqat!</b>\n"
-        f"Bazada {len(PLACES)} ta restoran bor.\n"
-        f"Barchasini o'chirib, kod ichidagi {len(initial_places)} ta restorandan "
-        f"qayta tiklashni xohlaysizmi?\n\n"
-        f"<i>Avval /backup buyrug'ini yuborib zaxira nusxa oling!</i>",
-        reply_markup=kb
-    )
-
 
 # ---------------- run ----------------
-async def sync_missing_places():
-    """
-    Agar bazada initial_places dan kam restoran bo'lsa,
-    yetishmayotganlarni avtomatik qo'shadi.
-    """
-    global db_pool
-    if db_pool is None:
-        await init_db()
-
-    async with db_pool.acquire() as conn:
-        existing = {r['name'] for r in await conn.fetch("SELECT name FROM places")}
-        added = 0
-        for p in initial_places:
-            if p['name'] not in existing:
-                await conn.execute(
-                    """INSERT INTO places (name, lat, lng, text_user, text_channel)
-                       VALUES ($1, $2, $3, $4, $5)""",
-                    p['name'], p['lat'], p['lng'],
-                    p.get('text_user', p['text']),
-                    p.get('text_channel', p['text'])
-                )
-                added += 1
-        if added:
-            print(f"⚠️  Avto-tiklash: {added} ta restoran bazaga qo'shildi!")
-            return True
-    return False
-
-
 async def main():
     global PLACES, db_pool
-
+    
+    # DB ulanish
     await init_db()
-
+    
     try:
         PLACES = await load_places_from_db()
-
-        # Avto-tiklash: agar bazada kam restoran bo'lsa
-        if len(PLACES) < len(initial_places):
-            restored = await sync_missing_places()
-            if restored:
-                PLACES = await load_places_from_db()
-
+        
+        # Agar bo'sh bo'lsa, initial ma'lumotlarni qo'shish
+        if not PLACES:
+            for p in initial_places:
+                await add_place_to_db(
+                    p["name"], p["lat"], p["lng"],
+                    p["text"], p["text"]
+                )
+            PLACES = await load_places_from_db()
+        
+        # PLACES formatini moslashtirish (id kalitini qo'shish)
         for i, place in enumerate(PLACES):
             if 'id' not in place:
-                place['id'] = i + 1
-
-        print(f"✅ Bot ishga tushdi. Bazada {len(PLACES)} ta restoran.")
+                place['id'] = i + 1  # Yoki DB dan qayta yuklash
+        
         await dp.start_polling(bot, skip_updates=True)
     finally:
         await close_db()
