@@ -613,8 +613,11 @@ def admin_main_menu_ikb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="➕ Yangi restoran qo‘shish", callback_data="start_add_rest")],
             [InlineKeyboardButton(text="📋 Barcha restoranlar", callback_data="show_all_restaurants")],
-            [InlineKeyboardButton(text="➕ So‘z qora ro‘yxati", callback_data="blacklist_word")],
-            [InlineKeyboardButton(text="📋 Qora ro‘yxat", callback_data="list_blacklist")]
+            [InlineKeyboardButton(text="➕ So‘z qora ro‘yxati", callback_data="blacklist_word"),
+             InlineKeyboardButton(text="📋 Qora ro‘yxat", callback_data="list_blacklist")],
+            [InlineKeyboardButton(text="📊 Baza holati", callback_data="dbstatus"),
+             InlineKeyboardButton(text="📦 Backup (CSV)", callback_data="backup")],
+            [InlineKeyboardButton(text="🔄 Restore (tiklash)", callback_data="restore")]
         ]
     )
 
@@ -1993,6 +1996,71 @@ async def force_restore_callback(call: types.CallbackQuery):
 @dp.callback_query(F.data == "cancel_restore")
 async def cancel_restore_callback(call: types.CallbackQuery):
     await call.message.edit_text("❌ Tiklash bekor qilindi.")
+
+
+# ---------------- NEW: Tugma handlerlari ----------------
+@dp.callback_query(F.data == "dbstatus")
+async def callback_dbstatus(call: types.CallbackQuery):
+    if call.from_user.id not in ADMIN_ID:
+        await call.answer("❌ Ruxsat yo'q!", show_alert=True)
+        return
+    await call.answer()
+    count = len(PLACES)
+    total = len(initial_places)
+    status = "✅ To'liq" if count >= total else f"⚠️ {total - count} ta yetishmayapti"
+    await call.message.answer(
+        f"📊 <b>Baza holati</b>\n"
+        f"Hozir: {count} ta\n"
+        f"Kutilgan: {total} ta\n"
+        f"Holat: {status}",
+        reply_markup=admin_main_menu_ikb()
+    )
+
+@dp.callback_query(F.data == "backup")
+async def callback_backup(call: types.CallbackQuery):
+    if call.from_user.id not in ADMIN_ID:
+        await call.answer("❌ Ruxsat yo'q!", show_alert=True)
+        return
+    await call.answer()
+
+    output = io.StringIO()
+    output.write("id|name|lat|lng|text_user|text_channel\n")
+    for p in PLACES:
+        output.write(
+            f"{p.get('id', '')}|{p['name']}|{p['lat']}|{p['lng']}|"
+            f"{p.get('text_user', '')}|{p.get('text_channel', '')}\n"
+        )
+
+    file = BufferedInputFile(
+        output.getvalue().encode('utf-8'),
+        filename=f"backup_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+    )
+    await call.message.answer_document(
+        file,
+        caption=f"📦 <b>Backup</b>\nBazada {len(PLACES)} ta restoran"
+    )
+
+@dp.callback_query(F.data == "restore")
+async def callback_restore(call: types.CallbackQuery):
+    if call.from_user.id not in ADMIN_ID:
+        await call.answer("❌ Ruxsat yo'q!", show_alert=True)
+        return
+    await call.answer()
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Ha, to'liq tiklash", callback_data="force_restore_confirm"),
+            InlineKeyboardButton(text="❌ Bekor", callback_data="cancel_restore")
+        ]
+    ])
+    await call.message.answer(
+        f"⚠️ <b>Diqqat!</b>\n"
+        f"Bazada {len(PLACES)} ta restoran bor.\n"
+        f"Barchasini o'chirib, kod ichidagi {len(initial_places)} ta restorandan "
+        f"qayta tiklashni xohlaysizmi?\n\n"
+        f"<i>Avval /backup buyrug'ini yuborib zaxira nusxa oling!</i>",
+        reply_markup=kb
+    )
 
 
 # ---------------- run ----------------
