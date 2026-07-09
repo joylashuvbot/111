@@ -2812,9 +2812,11 @@ async def by_location(message: types.Message):
     near = [p for p in PLACES if haversine(lat, lng, p["lat"], p["lng"]) <= 100]
     if not near:
         await message.answer(
-            "📍 100 km radiusda hech qanday muassasa yo'q.\n"
-            "📍 There are no establishments within 100 km radius.\n"
-            "📍 В радиусе 100 км нет никаких заведений.",
+            wrap_with_food_map(
+                "📍 100 km radiusda hech qanday muassasa yo'q.\n"
+                "📍 There are no establishments within 100 km radius.\n"
+                "📍 В радиусе 100 км нет никаких заведений."
+            ),
             reply_to_message_id=message.message_id
         )
         return
