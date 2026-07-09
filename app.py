@@ -2769,6 +2769,17 @@ def get_display_text(place):
     return place.get("text_user", place.get("text_channel", place.get("text", "")))
 
 
+# ---------- FOOD MAP sarlavha/havola ----------
+FOOD_MAP_LABEL = "👉FOOD MAP👈"
+FOOD_MAP_LINK = f'<a href="https://t.me/my_food_map_bot">{FOOD_MAP_LABEL}</a>'
+
+
+def wrap_with_food_map(text: str) -> str:
+    """Restoranlar ro'yxati matnining boshiga va oxiriga bosilganda
+    @my_food_map_bot ni ochadigan 'FOOD MAP' havolasini qo'shadi."""
+    return f"{FOOD_MAP_LINK}\n\n{text}\n\n{FOOD_MAP_LINK}"
+
+
 def split_text(text: str, limit: int = 4000) -> list[str]:
     """Katta matnni Telegram chegarasiga mos bo‘laklarga bo‘lib beradi."""
     if len(text) <= limit:
@@ -2808,7 +2819,7 @@ async def by_location(message: types.Message):
         )
         return
 
-    out = "\n\n".join(get_display_text(p) for p in near)
+    out = wrap_with_food_map("\n\n".join(get_display_text(p) for p in near))
     # uzun bo‘lsa bo‘laklama yuboramiz
     for part in split_text(out):
         await message.answer(
@@ -2966,7 +2977,7 @@ async def by_text(message: types.Message):
         return
 
     # 5) Javob
-    out = "\n\n".join(get_display_text(p) for p in found)
+    out = wrap_with_food_map("\n\n".join(get_display_text(p) for p in found))
     for part in split_text(out):
         await message.answer(
             part,
