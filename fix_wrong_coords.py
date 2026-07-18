@@ -44,6 +44,24 @@ def extract_gmaps_link(text_channel: str) -> str | None:
     return m.group(1) if m else None
 
 
+def expand_gmaps_short_link(url: str) -> str:
+    """
+    Qisqartirilgan (maps.app.goo.gl / goo.gl) havolani to'liq havolaga
+    aylantiradi. Aks holda extract_place_address_from_gmaps_url() qisqa
+    havolada hech qachon '/maps/place/...' qismini topa olmaydi va doim
+    None qaytaradi — aynan shu sabab bu skript "DATKA FOOD" kabi qisqa
+    havola bilan qo'shilgan yozuvlarni o'tkazib yuborgan edi.
+    """
+    try:
+        if "maps.app.goo.gl" in url or "goo.gl" in url:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            resp = requests.get(url, headers=headers, allow_redirects=True, timeout=15)
+            url = resp.url
+    except Exception as e:
+        print(f"  ⚠️ havolani kengaytirishda xato: {e}")
+    return unquote(url)
+
+
 def extract_place_address_from_gmaps_url(url: str) -> str | None:
     try:
         m = re.search(r"/maps/place/([^/]+)/", url)
@@ -123,9 +141,32 @@ async def main(dry_run: bool):
         if direct_lat is not None:
             continue  # Bu yozuv allaqachon to'g'ri, aniq koordinata bilan
 
-        # Bevosita chiqmasa — demak bu "place/CID" turidagi havola,
-        # va bazadagi lat/lng, ehtimol, umumiy shahar nomidan kelgan.
-        addr = extract_place_address_from_gmaps_url(link)
+        # Bevosita chiqmasa — havola qisqartirilgan (goo.gl) bo'lishi mumkin.
+        # Uni AVVAL kengaytirmasdan turib extract_place_address_from_gmaps_url()
+        # chaqirilsa, u hech qachon manzil topa olmaydi (chunki qisqa havolada
+        # '/maps/place/...' qismi yo'q) — aynan shu xato "DATKA FOOD" kabi
+        # yozuvlarni bu skript o'tkazib yuborishiga sabab bo'lgan edi.
+        expanded_link = expand_gmaps_short_link(link)
+
+        # Kengaytirilgandan keyin ba'zan to'g'ridan-to'g'ri @lat,lng yoki
+        # !3d..!4d.. chiqib qolishi mumkin — shuni ham tekshiramiz.
+        direct_lat, direct_lng = parse_gmaps_link(expanded_link)
+        if direct_lat is not None:
+            print(f"[{row['id']}] {row['name']}")
+            print(f"    eski: {row['lat']}, {row['lng']}")
+            print(f"    yangi (havoladan to'g'ridan-to'g'ri): {direct_lat}, {direct_lng}")
+            if not dry_run:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE places SET lat = $1, lng = $2 WHERE id = $3",
+                        direct_lat, direct_lng, row["id"],
+                    )
+            fixed += 1
+            continue
+
+        # "place/CID" turidagi havola — kengaytirilgan URL ichidan manzil
+        # matnini ajratamiz (masalan "Datka Food, 123 Main St, Chicago, IL").
+        addr = extract_place_address_from_gmaps_url(expanded_link)
         if not addr:
             print(f"[{row['id']}] {row['name']}: manzil havoladan chiqmadi, o'tkazib yuboriladi")
             continue
