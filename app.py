@@ -1554,31 +1554,6 @@ def extract_place_address_from_gmaps_url(url: str) -> str | None:
         return None
 
 
-def expand_gmaps_short_link(url: str) -> str:
-    """
-    Agar havola qisqartirilgan (maps.app.goo.gl / goo.gl) bo'lsa,
-    uni to'liq (kengaytirilgan) Google Maps havolasiga aylantiradi.
-    Qisqa havola bo'lmasa yoki kengaytirib bo'lmasa — unquote qilingan
-    asl havolani qaytaradi.
-
-    MUHIM: extract_place_address_from_gmaps_url() faqat KENGAYTIRILGAN
-    havoladan (/maps/place/... qismi bor) manzil ajrata oladi. Shu sabab
-    qisqa havolani unga to'g'ridan-to'g'ri (kengaytirmasdan) berish
-    xato — u doim None qaytaradi va kod umumiy shahar koordinatasiga
-    (masalan "Chicago, IL" markaziga) tushib qoladi.
-    """
-    try:
-        if "maps.app.goo.gl" in url or "goo.gl" in url:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            resp = requests.get(url, headers=headers, allow_redirects=True, timeout=15)
-            url = resp.url
-    except Exception as e:
-        print(f"Havolani kengaytirish xatosi: {e}")
-    return unquote(url)
-
-
 def parse_gmaps_link(url: str) -> tuple[float | None, float | None]:
     """
     Google Maps havolasidan latitude va longitude ajratib oladi.
@@ -1942,22 +1917,10 @@ async def confirm_add(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     lat, lng = parse_gmaps_link(data['map_link'])
     if lat is None:
-        # 0) Havola qisqartirilgan (goo.gl) bo'lishi mumkin — avval uni
-        #    KENGAYTIRAMIZ, aks holda extract_place_address_from_gmaps_url()
-        #    hech qachon /maps/place/... qismini topa olmaydi va doim None
-        #    qaytaradi (bu "DATKA FOOD" kabi yozuvlarning shahar markaziga
-        #    tushib qolishiga sabab bo'lgan xato edi).
-        expanded_link = expand_gmaps_short_link(data['map_link'])
-
-        # 0.1) Kengaytirilgandan keyin ba'zan @lat,lng yoki !3d..!4d.. chiqib
-        #      qolishi mumkin — shuni ham qayta tekshiramiz.
-        lat, lng = parse_gmaps_link(expanded_link)
-
-    if lat is None:
         # 1) Avval havoladagi haqiqiy manzilni geokodlashga urinamiz
         #    (masalan "Caravan Restaurant, 317 N Schmidt Rd, Bolingbrook, IL 60440")
         #    "city" (masalan faqat "Chicago, IL") dan ANCHA aniqroq bo'ladi.
-        addr = extract_place_address_from_gmaps_url(expanded_link)
+        addr = extract_place_address_from_gmaps_url(data['map_link'])
         if addr:
             lat, lng = await geocode_with_retry(addr)
     if lat is None:
@@ -3082,6 +3045,11 @@ async def main():
             if 'id' not in place:
                 place['id'] = i + 1  # Yoki DB dan qayta yuklash
         
+        # Agar bu bot uchun avval webhook o'rnatilgan bo'lsa, uni o'chiramiz.
+        # Aks holda getUpdates (polling) bilan konflikt bo'ladi:
+        # "Conflict: can't use getUpdates method while webhook is active"
+        await bot.delete_webhook(drop_pending_updates=True)
+
         await dp.start_polling(bot, skip_updates=True)
     finally:
         await close_db()
